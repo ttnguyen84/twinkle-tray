@@ -77,10 +77,23 @@ class LightSensor {
         this.canApplyBrightness = null;
         this.canControlMonitor = null;
         this.setLinkedLevel = null;
+        this.readMonitorBrightness = null;
+        this.wakeGraceUntil = 0;
+        this.lastWriteAt = 0;
+        this.readbackInterval = null;
     }
 
     async start(settings, monitors, dependencies) {
+        const rawApplyBrightness = dependencies.applyBrightness;
         Object.assign(this, dependencies);
+        // Wrap applyBrightness to track when the last write occurred,
+        // so readback polling can skip reads that would echo our own writes.
+        if (rawApplyBrightness) {
+            this.applyBrightness = (...args) => {
+                this.lastWriteAt = Date.now();
+                return rawApplyBrightness(...args);
+            };
+        }
         this.settings = this._healSettings(settings, this.writeSettings);
         this.monitors = monitors;
 
@@ -127,14 +140,21 @@ class LightSensor {
             this.filteredLux = null;
             this._resetLuxFilter();
             this._stopRamps();
-        } else if (this.filteredLux !== null) {
-            this._processReading(this.filteredLux);
+            this._stopReadback();
+        } else {
+            this._startReadback();
+            if (this.filteredLux !== null) {
+                this._processReading(this.filteredLux);
+            }
         }
         this._sendStatus();
     }
 
     async resume(options = {}) {
         if (!this.active) return null;
+        // Suppress readback for 5 seconds after wake to avoid treating
+        // stale/default brightness from monitors as a manual adjustment.
+        this.wakeGraceUntil = Date.now() + 5000;
         try {
             console.log(`Light Sensor: reconnecting ${this.active.name} after resume`);
             await this.active.reconnect();
@@ -206,6 +226,31 @@ class LightSensor {
     setManualBrightness() {
         this.pauseManual();
         return false;
+    }
+
+    /**
+     * Call when a monitor's brightness was changed externally (OSD buttons,
+     * Windows settings, etc.) and the app should treat it as a manual
+     * adjustment. This pauses auto-brightness, updates the lux→brightness
+     * curve to honour the user's preference, and refreshes the UI.
+     * @param {string} monitorKey - The monitor's key identifier
+     * @param {number} detectedLevel - The brightness level read from hardware (0-100)
+     */
+    handleExternalBrightnessChange(monitorKey, detectedLevel) {
+        if (!this.settings.enabled || !Number.isFinite(detectedLevel)) return;
+        const monitor = this._findMonitor(monitorKey);
+        if (!monitor || !this.isEnabledForMonitor(monitor)) return;
+
+        const level = clampBrightness(detectedLevel);
+        console.log(`Light Sensor: external brightness change detected on ${monitorKey}: ${level}`);
+
+        // Treat exactly like the user dragged the app slider:
+        // pause auto-brightness, learn the preference, notify UI.
+        this.pauseManual();
+        this.learnLinkLevel(level);
+        this.setLinkedLevel?.(level);
+        this.notifyMonitors?.();
+        this._sendStatus();
     }
 
     async getImmediateTargets() {
@@ -624,6 +669,58 @@ class LightSensor {
     _stopRampInterval() {
         if (this.rampInterval) clearInterval(this.rampInterval);
         this.rampInterval = null;
+    }
+
+    _startReadback() {
+        if (this.readbackInterval || !this.readMonitorBrightness) return;
+        this.readbackInterval = setInterval(() => this._tickReadback(), 10000);
+    }
+
+    _stopReadback() {
+        if (this.readbackInterval) clearInterval(this.readbackInterval);
+        this.readbackInterval = null;
+    }
+
+    async _tickReadback() {
+        if (!this.active || !this.settings.enabled || !this.readMonitorBrightness) return;
+        const now = Date.now();
+
+        // Skip during wake grace period — monitors may report stale defaults.
+        if (now < this.wakeGraceUntil) return;
+
+        // Skip if we wrote brightness recently — avoid echoing our own writes.
+        if (now < this.lastWriteAt + 1000) return;
+
+        // Skip if we're in a manual pause already or a ramp is running.
+        if (this._isManuallyPaused(now) || Object.keys(this.ramps).length > 0) return;
+
+        for (const monitor of this._getEnabledMonitors()) {
+            try {
+                const snapshot = await this.readMonitorBrightness(monitor.id);
+                if (!snapshot || !Number.isFinite(snapshot.brightness)) continue;
+
+                const hardwareRaw = snapshot.brightness;
+                const knownRaw = monitor.brightnessRaw;
+
+                // Check if another write happened while we were reading.
+                if (Date.now() < this.lastWriteAt + 1000) return;
+
+                if (!Number.isFinite(knownRaw)
+                    || Math.abs(hardwareRaw - knownRaw) < 2) continue;
+
+                // Hardware brightness differs from what we last wrote →
+                // the user adjusted it externally.
+                const normalizedLevel = Number.isFinite(snapshot.normalizedBrightness)
+                    ? snapshot.normalizedBrightness
+                    : hardwareRaw;
+                monitor.brightnessRaw = hardwareRaw;
+                monitor.brightness = clampBrightness(normalizedLevel);
+                this.handleExternalBrightnessChange(monitor.key, monitor.brightness);
+                return; // One detection per tick is enough.
+            } catch (error) {
+                console.warn(`Light Sensor: readback failed for ${monitor.id}:`, error);
+            }
+        }
     }
 
     _sendStatus() {
