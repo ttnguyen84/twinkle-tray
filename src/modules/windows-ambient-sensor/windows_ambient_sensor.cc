@@ -3,7 +3,9 @@
 #include <windows.h>
 #include <sensorsapi.h>
 #include <sensors.h>
+#include <propvarutil.h>
 #include <wchar.h>
+#include <memory>
 #include <string>
 #include <vector>
 #include "utils.hpp"
@@ -12,29 +14,145 @@
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "propsys.lib")
 
+// ---------- Minimal ISensorEvents implementation ----------
+// The Windows Sensor API requires an event sink to be registered on each
+// ISensor so the driver knows a client is consuming data.  Without this
+// subscription the driver never pushes fresh reports and GetData() keeps
+// returning the same stale value.
+class LightSensorEvents : public ISensorEvents {
+public:
+    LightSensorEvents() : refCount(1) {}
+
+    // IUnknown
+    STDMETHODIMP QueryInterface(REFIID iid, void** ppv) override {
+        if (iid == IID_IUnknown || iid == __uuidof(ISensorEvents)) {
+            *ppv = static_cast<ISensorEvents*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+    STDMETHODIMP_(ULONG) AddRef() override { return InterlockedIncrement(&refCount); }
+    STDMETHODIMP_(ULONG) Release() override {
+        ULONG r = InterlockedDecrement(&refCount);
+        if (r == 0) delete this;
+        return r;
+    }
+
+    // ISensorEvents – we only need the subscription to exist; the actual
+    // data is read synchronously via GetData() in the polling loop.
+    STDMETHODIMP OnStateChanged(ISensor*, SensorState) override { return S_OK; }
+    STDMETHODIMP OnDataUpdated(ISensor*, ISensorDataReport*) override { return S_OK; }
+    STDMETHODIMP OnEvent(ISensor*, REFGUID, IPortableDeviceValues*) override { return S_OK; }
+    STDMETHODIMP OnLeave(REFSENSOR_ID) override { return S_OK; }
+
+private:
+    volatile LONG refCount;
+};
+
+// ---------- Cached sensor state ----------
+struct CachedSensor {
+    ComPtr<ISensor> sensor;
+    LightSensorEvents* events = nullptr;  // prevent Release until we disconnect
+
+    ~CachedSensor() {
+        if (sensor && events) {
+            sensor->SetEventSink(nullptr);
+            events->Release();
+            events = nullptr;
+        }
+    }
+};
+
+std::vector<CachedSensor> cachedLightSensors;
+std::unique_ptr<ComInit> sensorComLifetime;
+
+// ---------- Helpers ----------
+
+// Set the report interval so the sensor driver delivers fresh data at
+// roughly the requested cadence (milliseconds).
+static void SetReportInterval(ISensor* sensor, ULONG intervalMs = 200) {
+    ComPtr<IPortableDeviceValues> props;
+    if (FAILED(CoCreateInstance(
+            CLSID_PortableDeviceValues, nullptr,
+            CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&props))))
+        return;
+
+    PROPVARIANT pv;
+    InitPropVariantFromUInt32(intervalMs, &pv);
+    props->SetValue(SENSOR_PROPERTY_CURRENT_REPORT_INTERVAL, &pv);
+    PropVariantClear(&pv);
+
+    sensor->SetProperties(props.Get(), nullptr);
+}
+
+double ReadLux(const ComPtr<ISensor>& sensor) {
+    if (!sensor) return -1;
+
+    ComPtr<ISensorDataReport> report;
+    if (FAILED(sensor->GetData(&report)) || !report) return -1;
+
+    PROPVARIANT value;
+    PropVariantInit(&value);
+    const HRESULT result = report->GetSensorValue(SENSOR_DATA_TYPE_LIGHT_LEVEL_LUX, &value);
+    double lux = -1;
+    if (SUCCEEDED(result)) {
+        if (value.vt == VT_R4) lux = value.fltVal;
+        if (value.vt == VT_R8) lux = value.dblVal;
+    }
+    PropVariantClear(&value);
+    return lux;
+}
+
+void ClearCachedSensors() {
+    cachedLightSensors.clear();
+}
+
+void RefreshCachedLightSensors() {
+    ClearCachedSensors();
+    auto rawSensors = GetSensors();
+
+    cachedLightSensors.reserve(rawSensors.size());
+    for (auto& sensor : rawSensors) {
+        CachedSensor entry;
+        entry.sensor = sensor;
+
+        // Subscribe to events so the driver pushes fresh data reports.
+        auto* events = new LightSensorEvents();
+        if (SUCCEEDED(sensor->SetEventSink(events))) {
+            entry.events = events;
+        } else {
+            events->Release();
+        }
+
+        // Ask the driver for ~200 ms report intervals.
+        SetReportInterval(sensor.Get(), 200);
+
+        cachedLightSensors.push_back(std::move(entry));
+    }
+}
+
 std::vector<SensorInfo> GetAllLightSensors() {
     ComInit com;
-
-    const auto sensors = GetSensors();
+    RefreshCachedLightSensors();
 
     std::vector<SensorInfo> sensorInfos;
-    sensorInfos.reserve(sensors.size());
-    for (const auto &sensor : sensors) {
-        sensorInfos.emplace_back(sensor);
+    sensorInfos.reserve(cachedLightSensors.size());
+    for (const auto& entry : cachedLightSensors) {
+        sensorInfos.emplace_back(entry.sensor);
     }
     return sensorInfos;
 }
 
 double GetLuxValueById(const std::string& id) {
     ComInit com;
-
-    const auto sensors = GetSensors();
-
-    for (const auto &sensor : sensors) {
+    if (cachedLightSensors.empty()) RefreshCachedLightSensors();
+    for (const auto& entry : cachedLightSensors) {
         SENSOR_ID sensorId;
-        if (SUCCEEDED(sensor->GetID(&sensorId))) {
+        if (SUCCEEDED(entry.sensor->GetID(&sensorId))) {
             if (GuidToString(sensorId) == id) {
-                return SensorInfo(sensor).currentLux;
+                return ReadLux(entry.sensor);
             }
         }
     }
@@ -93,17 +211,9 @@ Napi::Value NodeGetLuxValue(const Napi::CallbackInfo& info) {
             luxValue = GetLuxValueById(sensorId);
         } else {
             // Get lux from first available sensor
-            std::vector<SensorInfo> sensors = GetAllLightSensors();
-
-            for (const auto& sensor : sensors) {
-                luxValue = sensor.currentLux;
-
-                // If this sensor has no cached data, try getting it fresh
-                // before moving on to the next available sensor.
-                if (luxValue < 0.0 && !sensor.id.empty()) {
-                    luxValue = GetLuxValueById(sensor.id);
-                }
-
+            if (cachedLightSensors.empty()) RefreshCachedLightSensors();
+            for (const auto& entry : cachedLightSensors) {
+                luxValue = ReadLux(entry.sensor);
                 if (luxValue >= 0.0) {
                     break;
                 }
@@ -126,6 +236,7 @@ Napi::Value NodeGetLuxValue(const Napi::CallbackInfo& info) {
 
 // Initialize the module
 Napi::Object Init(Napi::Env env, Napi::Object exports) {
+    sensorComLifetime = std::make_unique<ComInit>();
     exports.Set(Napi::String::New(env, "getAmbientLightSensors"), 
                 Napi::Function::New(env, NodeGetAmbientLightSensors));
     exports.Set(Napi::String::New(env, "getLuxValue"), 

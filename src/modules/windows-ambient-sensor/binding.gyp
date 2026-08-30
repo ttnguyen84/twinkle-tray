@@ -15,7 +15,8 @@
       'libraries': [
         'sensorsapi.lib',
         'ole32.lib',
-        'propsys.lib'
+        'propsys.lib',
+        'PortableDeviceGUIDs.lib'
       ]
     },
   ]
