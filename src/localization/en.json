@@ -294,5 +294,15 @@
     "SETTINGS_LIGHT_SENSOR_YOCTO_AUTOSTART": "The virtual hub can be configured to auto start by running it on the command line with '-i'",
     "SETTINGS_LIGHT_SENSOR_YOCTO_SERVICE": "See \"-i : Installation as a service\" here",
     "SETTINGS_LIGHT_SENSOR_YOCTO_URL_LABEL": "VirtualHub URL:",
-    "SETTINGS_LIGHT_SENSOR_YOCTO_DISCONNECTED": "Disconnected"
+    "SETTINGS_LIGHT_SENSOR_YOCTO_DISCONNECTED": "Disconnected",
+    "SETTINGS_LIGHT_SENSOR_DAYTIME_BOOST_TITLE": "Daytime Lux Boost",
+    "SETTINGS_LIGHT_SENSOR_DAYTIME_BOOST_DESC": "Add extra lux during daytime to compensate for window glare. Uses sunrise/sunset from your location.",
+    "SETTINGS_LIGHT_SENSOR_DAYTIME_BOOST_ENABLE": "Enable daytime lux boost",
+    "SETTINGS_LIGHT_SENSOR_DAYTIME_BOOST_LUX_TITLE": "Lux offset",
+    "SETTINGS_LIGHT_SENSOR_DAYTIME_BOOST_LUX_DESC": "Extra lux to add at peak daytime.",
+    "SETTINGS_LIGHT_SENSOR_DAYTIME_BOOST_RAMP_TITLE": "Ramp duration (minutes)",
+    "SETTINGS_LIGHT_SENSOR_DAYTIME_BOOST_RAMP_DESC": "How long the offset takes to ramp up after sunrise and ramp down before sunset.",
+    "SETTINGS_LIGHT_SENSOR_DAYTIME_BOOST_NO_LOCATION": "Location not configured. Set your location in Time Adjustments settings to use this feature.",
+    "SETTINGS_LIGHT_SENSOR_DAYTIME_BOOST_STATUS_ACTIVE": "Active offset: +{{1}} lux",
+    "SETTINGS_LIGHT_SENSOR_DAYTIME_BOOST_STATUS_INACTIVE": "Inactive (nighttime)"
 }

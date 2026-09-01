@@ -1387,6 +1387,7 @@ function processSettings(newSettings = {}, sendUpdate = true) {
     }
     if (newSettings.lightSensor) {
       lightSensor.changeSettings(newSettings.lightSensor).catch(error => console.error("Couldn't update light sensor settings", error));
+      updateDaytimeBoostSunTimes()
     }
 
     if (settings.analytics) {
@@ -5552,6 +5553,9 @@ function addEventListeners() {
       } catch { return null }
     }
   }).catch(error => console.error("Couldn't start light sensor", error));
+
+  // Compute initial sunrise/sunset for daytime lux boost
+  updateDaytimeBoostSunTimes()
 }
 
 let handleAccentChangeTimeout = false
@@ -6074,6 +6078,41 @@ function getCurrentAdjustmentEventLERP() {
   }
 }
 
+/**
+ * Compute sunrise/sunset epoch timestamps from SunCalc and inject them
+ * into the lightSensor.daytimeBoost settings so the light-sensor module
+ * can calculate the daytime lux offset without needing SunCalc itself.
+ */
+function updateDaytimeBoostSunTimes() {
+  try {
+    const lat = Number(settings.adjustmentTimeLatitude);
+    const lon = Number(settings.adjustmentTimeLongitude);
+    if (!lat && !lon) return; // Location not configured
+
+    const times = SunCalc.getTimes(new Date(), lat, lon);
+    const sunriseMs = new Date(times.sunrise).getTime();
+    const sunsetMs = new Date(times.sunset).getTime();
+
+    if (!Number.isFinite(sunriseMs) || !Number.isFinite(sunsetMs)) return;
+
+    const current = settings.lightSensor?.daytimeBoost;
+    if (current?.sunriseMs === sunriseMs && current?.sunsetMs === sunsetMs) return;
+
+    settings.lightSensor = {
+      ...settings.lightSensor,
+      daytimeBoost: {
+        ...(settings.lightSensor?.daytimeBoost || {}),
+        sunriseMs,
+        sunsetMs
+      }
+    };
+    lightSensor.changeSettings(settings.lightSensor)
+      .catch(error => console.error("Couldn't update light sensor sun times", error));
+  } catch (e) {
+    console.error("Error updating daytime boost sun times", e);
+  }
+}
+
 function getSunCalcTime(timeName = "solarNoon") {
   const localTimes = SunCalc.getTimes(new Date(), settings.adjustmentTimeLatitude, settings.adjustmentTimeLongitude)
   const time = new Date(localTimes[timeName])
@@ -6175,6 +6214,9 @@ function handleBackgroundUpdate(force = false) {
     if (settings.adjustmentTimes.length > 0 && !userIdleDimmed) {
       applyCurrentAdjustmentEvent(force, false)
     }
+
+    // Refresh sunrise/sunset for daytime lux boost
+    updateDaytimeBoostSunTimes()
   } catch (e) {
     console.error(e)
   }

@@ -1,193 +1,176 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { SettingsChild, SettingsOption } from "../SettingsOption";
-import { getMonitorName } from "../utilts/monitor.util";
 import { YoctoSettings } from "./sensors/YoctoSettings";
 import { FakeSensorSettings } from "./sensors/FakeSettings";
 import { WindowsSettings } from "./sensors/WindowsSettings";
 
-export function LightSensorSettings({ T, renderToggle, monitors }) {
-
-  // trigger the monitor state update, as sometimes its not present
-  useEffect(() => window.reloadReactMonitors(), []);
-
-  const lightSensorSettings = window.settings.lightSensor ?? {
-    enabled: true,
+export function LightSensorSettings({ T }) {
+  const lightSensorSettings = window.settings.lightSensor || {
+    enabled: false,
     active: "windows",
     sensors: {
-        yocto: {
-            hubUrl: "user:password@localhost"
-        },
-        fake: {
-            overriddenLux: 2
-        },
-        windows: {}
-    },
-    "monitorSettings": {}
-};
-
-  const activeSensor = lightSensorSettings.active ?? 'fake';
-
-  const renderLightSensorToggle = useCallback(() => {
-    const isActive = lightSensorSettings.enabled || false;
-    return (
-      <div className="inputToggle-generic" data-textside="right">
-        <input 
-          onChange={(e) => { 
-            window.sendSettings({ 
-              lightSensor: { ...lightSensorSettings, enabled: e.target.checked } 
-            }); 
-          }} 
-          checked={isActive} 
-          data-checked={isActive} 
-          type="checkbox" 
-        />
-        <div className="text">{(isActive ? T.t("GENERIC_ON") : T.t("GENERIC_OFF"))}</div>
-      </div>
-    );
-  }, [lightSensorSettings, T]);
-
-  const minMaxChange = useCallback((monitor, type, value) => {
-    const currentSettings = lightSensorSettings.monitorSettings || {};
-    const monitorSettings = currentSettings[monitor.key] || { minLux: 5, maxLux: 250, enabled: true };
-    
-    if (type === 'min') {
-      monitorSettings.minLux = value;
-    } else if (type === 'max') {
-      monitorSettings.maxLux = value;
+      yocto: { hubUrl: "user:password@localhost" },
+      fake: { overriddenLux: 50 },
+      windows: {}
     }
-    
-    const newSettings = {
-      ...currentSettings,
-      [monitor.key]: monitorSettings
-    };
-    
-    window.sendSettings({ lightSensor: { ...lightSensorSettings, monitorSettings: newSettings } });
-  }, [lightSensorSettings]);
+  };
+  const activeSensor = lightSensorSettings.active || "windows";
+  const daytimeBoost = lightSensorSettings.daytimeBoost || {
+    enabled: false,
+    luxOffset: 100,
+    rampMinutes: 120
+  };
 
-  const toggleMonitorEnabled = useCallback((monitor, enabled) => {
-    const currentSettings = lightSensorSettings.monitorSettings || {};
-    const monitorSettings = currentSettings[monitor.key] || { minLux: 5, maxLux: 250, enabled: true };
-    
-    monitorSettings.enabled = enabled;
-    
-    const newSettings = {
-      ...currentSettings,
-      [monitor.key]: monitorSettings
-    };
-    
-    window.sendSettings({ lightSensor: { ...lightSensorSettings, monitorSettings: newSettings } });
-  }, [lightSensorSettings]);
-
-
-  const sensorTypeChanged = useCallback((e) => {
-    const newActive = e.target.value;
-    console.log({ lightSensor: { ...lightSensorSettings, active: newActive } });
-    window.sendSettings({ lightSensor: { ...lightSensorSettings, active: newActive } });
-  }, [lightSensorSettings]);
-
-  const [sensorInterval, setSensorInterval] = useState(lightSensorSettings.sensorPollingInterval || 5);
-  const sensorIntervalTimer = useRef(null);
+  const [sensorStatus, setSensorStatus] = useState(null);
 
   useEffect(() => {
-    setSensorInterval(lightSensorSettings.sensorPollingInterval || 5);
-  }, [lightSensorSettings.sensorPollingInterval]);
+    const handleStatus = (e, status) => setSensorStatus(status);
+    window.ipc.on("light-sensor-status", handleStatus);
+    window.ipc.send("request-light-sensor-status");
+    return () => {
+      window.ipc.removeListener("light-sensor-status", handleStatus);
+    };
+  }, []);
 
-  const sensorIntervalChanged = useCallback((e) => {
-    const newInterval = Number(e.target.value);
-    setSensorInterval(newInterval);
-    clearTimeout(sensorIntervalTimer.current);
-    sensorIntervalTimer.current = setTimeout(() => {
-      window.sendSettings({ lightSensor: { ...lightSensorSettings, sensorPollingInterval: newInterval } });
-    }, 1000);
+  const setEnabled = useCallback((enabled) => {
+    window.sendSettings({
+      lightSensor: { ...lightSensorSettings, enabled }
+    });
   }, [lightSensorSettings]);
-  return (
-    <>
-      <div className="pageSection">
-        <div className="sectionTitle">{T.t("SETTINGS_LIGHT_SENSOR_TITLE")}</div>
-        <p>
-          {T.t("SETTINGS_LIGHT_SENSOR_DESC")}
-        </p>
-        <br />
-        <SettingsOption title={T.t("SETTINGS_LIGHT_SENSOR_ENABLE")} input={renderLightSensorToggle()}>
-          <SettingsChild title={T.t("SETTINGS_LIGHT_SENSOR_TYPE_TITLE")} description={T.t("SETTINGS_LIGHT_SENSOR_TYPE_DESC")} input={
-            <select value={activeSensor} onChange={sensorTypeChanged}>
-                <option value="yocto">{T.t("SETTINGS_LIGHT_SENSOR_TYPE_YOCTO")}</option>
-                <option value="fake">{T.t("SETTINGS_LIGHT_SENSOR_TYPE_FAKE")}</option>
-                <option value="windows">{T.t("SETTINGS_LIGHT_SENSOR_TYPE_WINDOWS")}</option>
-            </select>
-          }></SettingsChild>
-          <SettingsChild title={T.t("SETTINGS_LIGHT_SENSOR_POLLING_TITLE")} description={T.t("SETTINGS_LIGHT_SENSOR_POLLING_DESC")} input={
-            <input 
-              type="number"
-              min="1"
-              max="3600"
-              value={sensorInterval}
-              onChange={sensorIntervalChanged}
-            />
-          } />
-        </SettingsOption>
 
-        {!(lightSensorSettings.enabled) ? <></> : <>
-        
-          {activeSensor === 'yocto' && <YoctoSettings T={T} lightSensorSettings={lightSensorSettings} />}
-          {activeSensor === 'fake' && <FakeSensorSettings T={T} lightSensorSettings={lightSensorSettings} />}
-          {activeSensor === 'windows' && <WindowsSettings T={T} />}
+  const setSensorType = useCallback((event) => {
+    window.sendSettings({
+      lightSensor: { ...lightSensorSettings, active: event.target.value }
+    });
+  }, [lightSensorSettings]);
 
-          <SettingsOption title={T.t("SETTINGS_LIGHT_SENSOR_MONITORS_TITLE")} description={
-            <>
-              <div>{T.t("SETTINGS_LIGHT_SENSOR_MONITORS_DESC")}</div>
-              <ul>
-                <li>{T.t("SETTINGS_LIGHT_SENSOR_MONITORS_DESC_MIN")}</li>
-                <li>{T.t("SETTINGS_LIGHT_SENSOR_MONITORS_DESC_MAX")}</li>
-                <li>{T.t("SETTINGS_LIGHT_SENSOR_MONITORS_DESC_INTERPOLATE")}</li>
-              </ul>
-            </>
-          } input={<></>}>
-            {Object.values(monitors ?? {}).map((monitor) => {
-              const monitorSettings = lightSensorSettings.monitorSettings?.[monitor.key] || { minLux: 5, maxLux: 250, enabled: false };
-              return (
-                <SettingsChild key={monitor.key}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <input 
-                      style={{ marginTop: '17px'}}
-                      type="checkbox" 
-                      checked={monitorSettings.enabled}
-                      data-checked={monitorSettings.enabled}
-                      onChange={(e) => toggleMonitorEnabled(monitor, e.target.checked)} 
-                    />
-                    <strong>{getMonitorName(monitor, {})}</strong>
-                    <div style={{ margin: '0 0 0 auto'}}>
-                        <label style={{ textTransform: "capitalize", fontSize: 'smaller' }}>{T.t("SETTINGS_LIGHT_SENSOR_MONITORS_MIN_LABEL")}</label>
-                        <input 
-                          style={{ marginTop: '5px '}}
-                          type="number" 
-                          min="0" 
-                          max="600" 
-                          value={monitorSettings.minLux} 
-                          onChange={(e) => minMaxChange(monitor, 'min', Number(e.target.value))} 
-                          />
-                    </div>
-                    <div>
-                        <label style={{ textTransform: "capitalize", fontSize: 'smaller' }}>{T.t("SETTINGS_LIGHT_SENSOR_MONITORS_MAX_LABEL")}</label>
-                        <input 
-                          style={{ marginTop: '5px '}}
-                          type="number" 
-                          min="0" 
-                          max="600" 
-                          value={monitorSettings.maxLux} 
-                          onChange={(e) => minMaxChange(monitor, 'max', Number(e.target.value))} 
-                        />
-                    </div>
-                    <span>{T.t("GENERIC_LUX")}</span>
-                  </div>
-                </SettingsChild>
-              );
-            })}
-          </SettingsOption>
-        
-        </>}
+  const updateDaytimeBoost = useCallback((changes) => {
+    window.sendSettings({
+      lightSensor: {
+        ...lightSensorSettings,
+        daytimeBoost: { ...daytimeBoost, ...changes }
+      }
+    });
+  }, [lightSensorSettings, daytimeBoost]);
 
+  const hasLocation = Boolean(
+    window.settings.adjustmentTimeLatitude || window.settings.adjustmentTimeLongitude
+  );
+
+  const enabledToggle = (
+    <div className="inputToggle-generic" data-textside="right">
+      <input
+        type="checkbox"
+        checked={Boolean(lightSensorSettings.enabled)}
+        data-checked={Boolean(lightSensorSettings.enabled)}
+        onChange={event => setEnabled(event.target.checked)}
+      />
+      <div className="text">
+        {lightSensorSettings.enabled ? T.t("GENERIC_ON") : T.t("GENERIC_OFF")}
       </div>
-    </>
+    </div>
+  );
+
+  const daytimeBoostToggle = (
+    <div className="inputToggle-generic" data-textside="right">
+      <input
+        type="checkbox"
+        checked={Boolean(daytimeBoost.enabled)}
+        data-checked={Boolean(daytimeBoost.enabled)}
+        onChange={event => updateDaytimeBoost({ enabled: event.target.checked })}
+      />
+      <div className="text">
+        {daytimeBoost.enabled ? T.t("GENERIC_ON") : T.t("GENERIC_OFF")}
+      </div>
+    </div>
+  );
+
+  const daytimeOffsetValue = sensorStatus?.daytimeLuxOffset;
+  const daytimeStatusText = daytimeBoost.enabled && hasLocation
+    ? (daytimeOffsetValue > 0
+      ? T.t("SETTINGS_LIGHT_SENSOR_DAYTIME_BOOST_STATUS_ACTIVE", Math.round(daytimeOffsetValue))
+      : T.t("SETTINGS_LIGHT_SENSOR_DAYTIME_BOOST_STATUS_INACTIVE"))
+    : null;
+
+  return (
+    <div className="pageSection">
+      <div className="sectionTitle">{T.t("SETTINGS_LIGHT_SENSOR_TITLE")}</div>
+      <p>{T.t("SETTINGS_LIGHT_SENSOR_DESC")}</p>
+      <br />
+      <SettingsOption title={T.t("SETTINGS_LIGHT_SENSOR_ENABLE")} input={enabledToggle}>
+        <SettingsChild
+          title={T.t("SETTINGS_LIGHT_SENSOR_TYPE_TITLE")}
+          description={T.t("SETTINGS_LIGHT_SENSOR_TYPE_DESC")}
+          input={
+            <select value={activeSensor} onChange={setSensorType}>
+              <option value="yocto">{T.t("SETTINGS_LIGHT_SENSOR_TYPE_YOCTO")}</option>
+              <option value="fake">{T.t("SETTINGS_LIGHT_SENSOR_TYPE_FAKE")}</option>
+              <option value="windows">{T.t("SETTINGS_LIGHT_SENSOR_TYPE_WINDOWS")}</option>
+            </select>
+          }
+        />
+      </SettingsOption>
+
+      {lightSensorSettings.enabled && activeSensor === "yocto"
+        ? <YoctoSettings T={T} lightSensorSettings={lightSensorSettings} />
+        : null}
+      {lightSensorSettings.enabled && activeSensor === "fake"
+        ? <FakeSensorSettings T={T} lightSensorSettings={lightSensorSettings} />
+        : null}
+      {lightSensorSettings.enabled && activeSensor === "windows"
+        ? <WindowsSettings T={T} />
+        : null}
+
+      {lightSensorSettings.enabled ? (
+        <SettingsOption
+          title={T.t("SETTINGS_LIGHT_SENSOR_DAYTIME_BOOST_TITLE")}
+          description={T.t("SETTINGS_LIGHT_SENSOR_DAYTIME_BOOST_DESC")}
+          input={daytimeBoostToggle}
+        >
+          {!hasLocation ? (
+            <SettingsChild>
+              <p style={{ color: "var(--warning-color, #e8912d)" }}>
+                {T.t("SETTINGS_LIGHT_SENSOR_DAYTIME_BOOST_NO_LOCATION")}
+              </p>
+            </SettingsChild>
+          ) : null}
+          <SettingsChild
+            title={T.t("SETTINGS_LIGHT_SENSOR_DAYTIME_BOOST_LUX_TITLE")}
+            description={T.t("SETTINGS_LIGHT_SENSOR_DAYTIME_BOOST_LUX_DESC")}
+            input={
+              <input
+                type="number"
+                min="0"
+                max="500"
+                step="10"
+                value={daytimeBoost.luxOffset ?? 100}
+                onChange={e => updateDaytimeBoost({ luxOffset: Math.max(0, Number(e.target.value) || 0) })}
+                style={{ maxWidth: "80px" }}
+              />
+            }
+          />
+          <SettingsChild
+            title={T.t("SETTINGS_LIGHT_SENSOR_DAYTIME_BOOST_RAMP_TITLE")}
+            description={T.t("SETTINGS_LIGHT_SENSOR_DAYTIME_BOOST_RAMP_DESC")}
+            input={
+              <input
+                type="number"
+                min="0"
+                max="360"
+                step="10"
+                value={daytimeBoost.rampMinutes ?? 120}
+                onChange={e => updateDaytimeBoost({ rampMinutes: Math.max(0, Number(e.target.value) || 0) })}
+                style={{ maxWidth: "80px" }}
+              />
+            }
+          />
+          {daytimeStatusText ? (
+            <SettingsChild>
+              <p>{daytimeStatusText}</p>
+            </SettingsChild>
+          ) : null}
+        </SettingsOption>
+      ) : null}
+    </div>
   );
 }

@@ -6,6 +6,7 @@ const {
     getAdaptiveDelay,
     getBrightnessFromLux,
     getBurstLux,
+    getDaytimeLuxOffset,
     getMedianLux,
     getTargetDeadband,
     getTransitionPlan,
@@ -20,6 +21,13 @@ const defaultSettings = {
     minLux: 50,
     maxLux: 500,
     learnedAdjustments: [0, 0, 0, 0, 0, 0, 0],
+    daytimeBoost: {
+        enabled: false,
+        luxOffset: 100,
+        rampMinutes: 120,
+        sunriseMs: null,
+        sunsetMs: null
+    },
     sensors: {
         yocto: {
             hubUrl: "user:password@localhost"
@@ -464,8 +472,10 @@ class LightSensor {
     }
 
     _buildTargets(lux) {
+        const offset = getDaytimeLuxOffset(Date.now(), this.settings.daytimeBoost);
+        const effectiveLux = lux + offset;
         const targetBrightness = getBrightnessFromLux(
-            lux,
+            effectiveLux,
             this.settings.minLux,
             this.settings.maxLux,
             this.settings.learnedAdjustments
@@ -731,9 +741,11 @@ class LightSensor {
         if (!send) return;
         this.active?.sendStatus?.(send);
         const lux = this.filteredLux ?? this.currentLux;
-        const targetBrightness = Number.isFinite(lux)
+        const daytimeLuxOffset = getDaytimeLuxOffset(Date.now(), this.settings.daytimeBoost);
+        const effectiveLux = Number.isFinite(lux) ? lux + daytimeLuxOffset : null;
+        const targetBrightness = effectiveLux !== null
             ? getBrightnessFromLux(
-                lux,
+                effectiveLux,
                 this.settings.minLux,
                 this.settings.maxLux,
                 this.settings.learnedAdjustments
@@ -756,6 +768,7 @@ class LightSensor {
             active: this.settings.active,
             currentLux: this.currentLux,
             filteredLux: this.filteredLux,
+            daytimeLuxOffset: Math.round(daytimeLuxOffset * 10) / 10,
             targetBrightness,
             available: this.currentLux !== null,
             paused: this._isManuallyPaused(),
@@ -775,6 +788,10 @@ class LightSensor {
             minLux: Number(settings?.minLux),
             maxLux: Number(settings?.maxLux),
             learnedAdjustments: normalizeLearnedCurve(settings?.learnedAdjustments ?? migratedCurve),
+            daytimeBoost: {
+                ...clone(defaultSettings.daytimeBoost),
+                ...(settings?.daytimeBoost || {})
+            },
             sensors: {
                 yocto: {
                     ...clone(defaultSettings.sensors.yocto),

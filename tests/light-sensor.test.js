@@ -14,6 +14,7 @@ const {
   getAdaptiveDelay,
   getBrightnessFromLux,
   getBurstLux,
+  getDaytimeLuxOffset,
   getMedianLux,
   getTargetDeadband,
   getTransitionPlan,
@@ -352,4 +353,98 @@ test('readback skipped after recent brightness write', async () => {
 
   assert.equal(readCalled, false, 'readback should not call read after recent write');
   assert.equal(monitor.brightness, 50, 'brightness unchanged');
+});
+
+// --- Daytime Lux Boost tests ---
+
+test('getDaytimeLuxOffset returns 0 when disabled', () => {
+  assert.equal(getDaytimeLuxOffset(Date.now(), null), 0);
+  assert.equal(getDaytimeLuxOffset(Date.now(), { enabled: false, luxOffset: 100 }), 0);
+  assert.equal(getDaytimeLuxOffset(Date.now(), { enabled: true, luxOffset: 0 }), 0);
+});
+
+test('getDaytimeLuxOffset returns 0 when outside sunrise-sunset', () => {
+  const sunrise = new Date('2025-06-15T06:00:00').getTime();
+  const sunset = new Date('2025-06-15T18:00:00').getTime();
+  const boost = { enabled: true, luxOffset: 100, rampMinutes: 120, sunriseMs: sunrise, sunsetMs: sunset };
+  // Before sunrise
+  const before = new Date('2025-06-15T05:30:00').getTime();
+  assert.equal(getDaytimeLuxOffset(before, boost), 0);
+  // After sunset
+  const after = new Date('2025-06-15T18:30:00').getTime();
+  assert.equal(getDaytimeLuxOffset(after, boost), 0);
+});
+
+test('getDaytimeLuxOffset ramps up linearly after sunrise', () => {
+  const sunrise = new Date('2025-06-15T06:00:00').getTime();
+  const sunset = new Date('2025-06-15T18:00:00').getTime();
+  const boost = { enabled: true, luxOffset: 100, rampMinutes: 120, sunriseMs: sunrise, sunsetMs: sunset };
+  // At sunrise: 0
+  assert.equal(getDaytimeLuxOffset(sunrise, boost), 0);
+  // 1 hour after sunrise: 50%
+  const oneHour = sunrise + 60 * 60 * 1000;
+  assert.equal(Math.round(getDaytimeLuxOffset(oneHour, boost)), 50);
+  // 2 hours after sunrise: 100%
+  const twoHours = sunrise + 120 * 60 * 1000;
+  assert.equal(getDaytimeLuxOffset(twoHours, boost), 100);
+});
+
+test('getDaytimeLuxOffset returns full offset during midday', () => {
+  const sunrise = new Date('2025-06-15T06:00:00').getTime();
+  const sunset = new Date('2025-06-15T18:00:00').getTime();
+  const boost = { enabled: true, luxOffset: 200, rampMinutes: 120, sunriseMs: sunrise, sunsetMs: sunset };
+  const noon = new Date('2025-06-15T12:00:00').getTime();
+  assert.equal(getDaytimeLuxOffset(noon, boost), 200);
+});
+
+test('getDaytimeLuxOffset ramps down linearly before sunset', () => {
+  const sunrise = new Date('2025-06-15T06:00:00').getTime();
+  const sunset = new Date('2025-06-15T18:00:00').getTime();
+  const boost = { enabled: true, luxOffset: 100, rampMinutes: 120, sunriseMs: sunrise, sunsetMs: sunset };
+  // 2 hours before sunset: start ramp down = 100
+  const rampStart = sunset - 120 * 60 * 1000;
+  assert.equal(getDaytimeLuxOffset(rampStart, boost), 100);
+  // 1 hour before sunset: 50%
+  const oneHourBefore = sunset - 60 * 60 * 1000;
+  assert.equal(Math.round(getDaytimeLuxOffset(oneHourBefore, boost)), 50);
+  // At sunset: 0
+  assert.equal(getDaytimeLuxOffset(sunset, boost), 0);
+});
+
+test('getDaytimeLuxOffset handles overlapping ramp periods (very short day)', () => {
+  const sunrise = new Date('2025-06-15T10:00:00').getTime();
+  const sunset = new Date('2025-06-15T12:00:00').getTime(); // only 2 hours of daylight
+  const boost = { enabled: true, luxOffset: 100, rampMinutes: 120, sunriseMs: sunrise, sunsetMs: sunset };
+  // Midpoint at 11:00
+  const midpoint = new Date('2025-06-15T11:00:00').getTime();
+  assert.equal(getDaytimeLuxOffset(midpoint, boost), 100);
+  // Halfway through ramp up (10:30)
+  const halfUp = new Date('2025-06-15T10:30:00').getTime();
+  assert.equal(Math.round(getDaytimeLuxOffset(halfUp, boost)), 50);
+});
+
+test('getDaytimeLuxOffset returns 0 for invalid sun times', () => {
+  assert.equal(getDaytimeLuxOffset(Date.now(), { enabled: true, luxOffset: 100, sunriseMs: null, sunsetMs: null }), 0);
+  assert.equal(getDaytimeLuxOffset(Date.now(), { enabled: true, luxOffset: 100, sunriseMs: 100, sunsetMs: 50 }), 0);
+});
+
+test('_buildTargets includes daytime offset in brightness calculation', () => {
+  const monitor = { key: 'display-a', id: 'display-a-id', brightness: 10 };
+  const sensor = createSensor([monitor]);
+  // Without boost
+  const noBoostTargets = sensor._buildTargets(200);
+  // With boost: add daytimeBoost settings
+  const sunrise = Date.now() - 3 * 60 * 60 * 1000; // 3 hours ago
+  const sunset = Date.now() + 6 * 60 * 60 * 1000;  // 6 hours from now
+  sensor.settings.daytimeBoost = {
+    enabled: true,
+    luxOffset: 100,
+    rampMinutes: 120,
+    sunriseMs: sunrise,
+    sunsetMs: sunset
+  };
+  const boostTargets = sensor._buildTargets(200);
+  // With offset, effective lux = 300, so brightness should be higher
+  assert.ok(boostTargets[monitor.key].targetBrightness > noBoostTargets[monitor.key].targetBrightness,
+    'daytime boost should increase brightness target');
 });
