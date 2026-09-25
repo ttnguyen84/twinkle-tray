@@ -54,6 +54,10 @@ public:
         const HRESULT hr = CoInitializeEx(nullptr, coinit);
         if (SUCCEEDED(hr)) {
             owns = true;
+        } else if (hr == RPC_E_CHANGED_MODE) {
+            // Already initialized with a different concurrency model (e.g. MTA/STA).
+            // COM is still usable on this thread, but this instance must not uninitialize it.
+            owns = false;
         } else {
             throw std::runtime_error("CoInitializeEx failed with HRESULT " + toHex(hr));
         }
@@ -140,9 +144,7 @@ ComPtr<ISensorManager> GetSensorManager()
     );
 
     if (FAILED(hr) || !sensorManager) {
-        throw std::runtime_error(
-            "Failed to create ISensorManager: HRESULT " + std::to_string(hr)
-        );
+        return nullptr;
     }
 
     return sensorManager;
@@ -153,23 +155,22 @@ std::vector<ComPtr<ISensor>> GetSensors()
     ComInit com;
 
     const auto manager = GetSensorManager();
+    if (!manager) {
+        return {};
+    }
 
     ComPtr<ISensorCollection> sensorCollection;
 
     const auto hr = manager->GetSensorsByType(SENSOR_TYPE_AMBIENT_LIGHT, &sensorCollection);
 
-    if (hr == HRESULT_FROM_WIN32(ERROR_NOT_FOUND)) { 
-        return {}; 
-    }
-
     if (FAILED(hr) || !sensorCollection) {
-        throw std::runtime_error(
-            "Failed to create ISensorCollection: HRESULT " + std::to_string(hr)
-        );
+        return {};
     }
 
     ULONG count = 0;
-    sensorCollection->GetCount(&count);
+    if (FAILED(sensorCollection->GetCount(&count))) {
+        return {};
+    }
 
     std::vector<ComPtr<ISensor>> sensors;
     sensors.reserve(count);
@@ -177,8 +178,9 @@ std::vector<ComPtr<ISensor>> GetSensors()
     for (ULONG i = 0; i < count; ++i)
     {
         ComPtr<ISensor> sensor;
-        sensorCollection->GetAt(i, &sensor);
-        sensors.push_back(sensor);
+        if (SUCCEEDED(sensorCollection->GetAt(i, &sensor)) && sensor) {
+            sensors.push_back(sensor);
+        }
     }
 
     return sensors;

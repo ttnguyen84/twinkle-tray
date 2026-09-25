@@ -4,6 +4,8 @@
 #include <sensorsapi.h>
 #include <sensors.h>
 #include <propvarutil.h>
+#include <wrl/client.h>
+#include <wrl/implements.h>
 #include <wchar.h>
 #include <memory>
 #include <string>
@@ -16,51 +18,34 @@
 
 // ---------- Minimal ISensorEvents implementation ----------
 // The Windows Sensor API requires an event sink to be registered on each
-// ISensor so the driver knows a client is consuming data.  Without this
+// ISensor so the driver knows a client is consuming data. Without this
 // subscription the driver never pushes fresh reports and GetData() keeps
 // returning the same stale value.
-class LightSensorEvents : public ISensorEvents {
+class LightSensorEvents : public Microsoft::WRL::RuntimeClass<
+    Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
+    ISensorEvents>
+{
 public:
-    LightSensorEvents() : refCount(1) {}
-
-    // IUnknown
-    STDMETHODIMP QueryInterface(REFIID iid, void** ppv) override {
-        if (iid == IID_IUnknown || iid == __uuidof(ISensorEvents)) {
-            *ppv = static_cast<ISensorEvents*>(this);
-            AddRef();
-            return S_OK;
-        }
-        *ppv = nullptr;
-        return E_NOINTERFACE;
-    }
-    STDMETHODIMP_(ULONG) AddRef() override { return InterlockedIncrement(&refCount); }
-    STDMETHODIMP_(ULONG) Release() override {
-        ULONG r = InterlockedDecrement(&refCount);
-        if (r == 0) delete this;
-        return r;
-    }
-
-    // ISensorEvents – we only need the subscription to exist; the actual
-    // data is read synchronously via GetData() in the polling loop.
     STDMETHODIMP OnStateChanged(ISensor*, SensorState) override { return S_OK; }
     STDMETHODIMP OnDataUpdated(ISensor*, ISensorDataReport*) override { return S_OK; }
     STDMETHODIMP OnEvent(ISensor*, REFGUID, IPortableDeviceValues*) override { return S_OK; }
     STDMETHODIMP OnLeave(REFSENSOR_ID) override { return S_OK; }
-
-private:
-    volatile LONG refCount;
 };
 
 // ---------- Cached sensor state ----------
 struct CachedSensor {
     ComPtr<ISensor> sensor;
-    LightSensorEvents* events = nullptr;  // prevent Release until we disconnect
+    ComPtr<ISensorEvents> events;
+
+    CachedSensor() = default;
+    CachedSensor(CachedSensor&&) noexcept = default;
+    CachedSensor& operator=(CachedSensor&&) noexcept = default;
+    CachedSensor(const CachedSensor&) = delete;
+    CachedSensor& operator=(const CachedSensor&) = delete;
 
     ~CachedSensor() {
-        if (sensor && events) {
+        if (sensor) {
             sensor->SetEventSink(nullptr);
-            events->Release();
-            events = nullptr;
         }
     }
 };
@@ -73,6 +58,8 @@ std::unique_ptr<ComInit> sensorComLifetime;
 // Set the report interval so the sensor driver delivers fresh data at
 // roughly the requested cadence (milliseconds).
 static void SetReportInterval(ISensor* sensor, ULONG intervalMs = 200) {
+    if (!sensor) return;
+
     ComPtr<IPortableDeviceValues> props;
     if (FAILED(CoCreateInstance(
             CLSID_PortableDeviceValues, nullptr,
@@ -99,7 +86,9 @@ double ReadLux(const ComPtr<ISensor>& sensor) {
     double lux = -1;
     if (SUCCEEDED(result)) {
         if (value.vt == VT_R4) lux = value.fltVal;
-        if (value.vt == VT_R8) lux = value.dblVal;
+        else if (value.vt == VT_R8) lux = value.dblVal;
+        else if (value.vt == VT_UI4) lux = value.ulVal;
+        else if (value.vt == VT_I4) lux = value.lVal;
     }
     PropVariantClear(&value);
     return lux;
@@ -115,15 +104,14 @@ void RefreshCachedLightSensors() {
 
     cachedLightSensors.reserve(rawSensors.size());
     for (auto& sensor : rawSensors) {
+        if (!sensor) continue;
         CachedSensor entry;
         entry.sensor = sensor;
 
         // Subscribe to events so the driver pushes fresh data reports.
-        auto* events = new LightSensorEvents();
-        if (SUCCEEDED(sensor->SetEventSink(events))) {
+        auto events = Microsoft::WRL::Make<LightSensorEvents>();
+        if (events && SUCCEEDED(sensor->SetEventSink(events.Get()))) {
             entry.events = events;
-        } else {
-            events->Release();
         }
 
         // Ask the driver for ~200 ms report intervals.
