@@ -20,8 +20,14 @@
     "GENERIC_NO_DISPLAYS_SHORT": "Không phát hiện thấy màn hình tương thích.",
     "PANEL_TITLE": "Điều chỉnh độ sáng",
     "PANEL_UPDATE_AVAILABLE": "Đã có phiên bản mới",
-    "PANEL_BUTTON_LINK_LEVELS": "Liên kết",
+    "PANEL_BUTTON_LINK_LEVELS": "Link levels",
+    "PANEL_DETAILS": "Chi tiết",
     "PANEL_BUTTON_TURN_OFF_DISPLAYS": "Tắt màn hình",
+    "PANEL_AUTO_BRIGHTNESS": "Độ sáng tự động",
+    "PANEL_AUTO_LABEL": "Tự động",
+    "PANEL_AUTO_WAITING": "Đang chờ cảm biến",
+    "PANEL_AUTO_STABILIZING": "Đang chờ ổn định",
+    "PANEL_AUTO_ADJUSTING": "Đang điều chỉnh",
     "INTRO_TITLE": "Xin chào, Twinkle Tray!",
     "INTRO_INSTRUCTIONS": "Biểu tượng Twinkle Tray đã bị ẩn, vì vậy bạn nên di chuyển nó đến nơi có thể dễ dàng truy cập. Xem bên dưới để được hướng dẫn.",
     "SETTINGS_TITLE": "Thiết lập Twinkle Tray",
@@ -249,5 +255,5 @@
     "SETTINGS_PROFILES_APP_DESC": "Nếu bạn muốn hồ sơ này được kích hoạt tự động khi một ứng dụng bất kỳ được sử dụng, nhập đường dẫn tệp EXE xuống dưới.",
     "SETTINGS_PROFILES_OVERLAY_TITLE": "Ghi đè loại lớp phủ",
     "SETTINGS_PROFILES_OVERLAY_DESC": "Thay đổi hành vi của lớp phủ phím tắt khi một ứng dụng chỉ định được sử dụng. Tính năng này không hoạt động khi hồ sơ được kích hoạt thủ công.",
-    "SETTINGS_LIGHT_SENSOR_MONITORS_TITLE": "Thiết lập màn hình"
+    "SETTINGS_LIGHT_SENSOR_WINDOWS_CHECKING": "Đang kiểm tra cảm biến ánh sáng Windows…"
 }

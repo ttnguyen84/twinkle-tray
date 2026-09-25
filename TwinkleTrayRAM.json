@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "repoName": "TwinkleTray",
+  "buildName": "TwinkleTray",
+  "ramDirectories": [
+    {
+      "path": "build",
+      "repoPath": "build",
+      "preserveExisting": false
+    },
+    {
+      "path": "cache",
+      "repoPath": "cache",
+      "preserveExisting": false
+    },
+    {
+      "path": "logs",
+      "repoPath": "logs",
+      "preserveExisting": true
+    },
+    {
+      "path": "temp"
+    },
+    {
+      "path": "TestResults\\repo",
+      "repoPath": "TestResults",
+      "preserveExisting": true
+    }
+  ]
+}

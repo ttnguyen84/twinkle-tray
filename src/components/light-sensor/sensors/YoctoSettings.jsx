@@ -20,6 +20,7 @@ export function YoctoSettings({ T, lightSensorSettings }) {
     };
 
     window.ipc.on("light-sensor--yocto", handleYoctoStatus);
+    window.ipc.send("request-light-sensor-status");
 
     return () => {
       window.ipc.removeListener("light-sensor--yocto", handleYoctoStatus);

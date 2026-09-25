@@ -1,6 +1,7 @@
 require('yoctolib-es2017/yocto_api.js');
 require('yoctolib-es2017/yocto_lightsensor.js');
-const { applyMonitorBrightnessFromLux, getBrightnessFromLux } = require('../light-sensor.utilts');
+
+const RECONNECT_DELAYS = [5000, 15000, 30000, 60000];
 
 class YoctoLightSensor {
   constructor() {
@@ -10,28 +11,65 @@ class YoctoLightSensor {
     this.sensor = null;
     this.currentLux = null;
     this.reconnectTimer = null;
+    this.reconnectAttempt = 0;
     this.updateInterval = null;
     this.settings = null;
-    this.monitors = null;
     this.sendToAllWindows = null;
-    this.updateBrightnessThrottle = null;
-    this.lastAppliedBrightness = null;
+    this.onReading = null;
   }
 
-  initialize(settings, monitors, sendToAllWindows, updateBrightnessThrottle) {
+  initialize(settings, sendToAllWindows, onReading) {
     this.settings = settings;
-    this.monitors = monitors;
     this.sendToAllWindows = sendToAllWindows;
-    this.updateBrightnessThrottle = updateBrightnessThrottle;
+    this.onReading = onReading;
   }
 
-  async changeSettings(settings) {
-
-    const connectionUrlChanged = this.settings.sensors.yocto.hubUrl !== settings.sensors.yocto.hubUrl;
+  async changeSettings(settings, previous = {}) {
+    const connectionChanged = settings.sensors.yocto.hubUrl !== previous.sensors?.yocto?.hubUrl;
+    const intervalChanged = settings.sensorPollingInterval !== previous.sensorPollingInterval;
     this.settings = settings;
-    this._startPolling();
-    if (connectionUrlChanged) {
-      this.reconnect();
+
+    if (connectionChanged && this.hubConnected) {
+      await this.reconnect();
+    } else if (intervalChanged && this.hubConnected) {
+      this._startPolling();
+    }
+  }
+
+  async connect() {
+    try {
+      await YAPI.LogUnhandledPromiseRejections();
+      await YAPI.DisableExceptions();
+
+      const hubUrl = this.settings.sensors.yocto.hubUrl;
+      console.log(`Yoctohub url: ${hubUrl}`);
+      const result = await YAPI.RegisterHub(hubUrl);
+      if (result !== YAPI.SUCCESS) throw new Error("Hub connection failed");
+
+      this.hubConnected = true;
+      this.reconnectAttempt = 0;
+      YAPI.RegisterDeviceArrivalCallback(() => this._handleDeviceArrival());
+      YAPI.RegisterDeviceRemovalCallback(() => this._handleDeviceRemoval());
+      await YAPI.UpdateDeviceList();
+
+      this.sensor = YLightSensor.FirstLightSensor();
+      this.sensorConnected = Boolean(this.sensor && await this.sensor.isOnline());
+      this._sendStatus();
+
+      if (this.sensorConnected) {
+        await this._update();
+        this._startPolling();
+      } else {
+        this._scheduleReconnect();
+      }
+    } catch (error) {
+      console.error("Yocto connection error:", error);
+      this.hubConnected = false;
+      this.sensorConnected = false;
+      this.currentLux = null;
+      this.onReading(null);
+      this._sendStatus();
+      this._scheduleReconnect();
     }
   }
 
@@ -40,160 +78,108 @@ class YoctoLightSensor {
     await this.connect();
   }
 
-  async connect() {
-    try {
-      await YAPI.LogUnhandledPromiseRejections();
-      await YAPI.DisableExceptions();
-
-      console.log(`Yoctohub url: ${this.settings.sensors.yocto.hubUrl}`);
-      const res = await YAPI.RegisterHub(this.settings.sensors.yocto.hubUrl);
-      if (res === YAPI.SUCCESS) {
-        this.hubConnected = true;
-        console.log("Yocto VirtualHub connected");
-
-        // Setup device callbacks
-        YAPI.RegisterDeviceArrivalCallback(() => {
-          this.sensorConnected = true;
-          this._sendStatus();
-        });
-        YAPI.RegisterDeviceRemovalCallback(() => {
-          this.sensorConnected = false;
-          this._sendStatus();
-        });
-
-        // Try to find sensor immediately
-        this.sensor = YLightSensor.FirstLightSensor();
-        if (this.sensor) {
-          this.sensorConnected = true;
-        }
-
-        this._sendStatus();
-        this._startPolling();
-      } else {
-        throw new Error("Hub connection failed");
-      }
-    } catch (err) {
-      console.error("Yocto connection error:", err);
-      this.hubConnected = false;
-      this.sensorConnected = false;
-      this._sendStatus();
-      this._scheduleReconnect();
-    }
-  }
-
   async disconnect() {
     this._stopPolling();
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-    } 
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
     try {
       await YAPI.FreeAPI();
-    } catch (e) {
-      console.error("Error freeing YAPI", e);
+    } catch (error) {
+      console.error("Error freeing YAPI", error);
     }
     this.hubConnected = false;
     this.sensorConnected = false;
+    this.sensor = null;
     this.currentLux = null;
-    this.lastAppliedBrightness = null;
+    this.onReading(null);
     this._sendStatus();
   }
 
-  _scheduleReconnect() {
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
+  async _handleDeviceArrival() {
+    this.sensor = YLightSensor.FirstLightSensor();
+    this.sensorConnected = Boolean(this.sensor && await this.sensor.isOnline());
+    if (this.sensorConnected) {
+      this.reconnectAttempt = 0;
+      await this._update();
+      this._startPolling();
     }
-
-    this.reconnectTimer = setTimeout(async () => {
-      console.log("Attempting Yocto reconnect...");
-      try {
-        await YAPI.FreeAPI();
-      } catch (e) {
-        console.error("Error freeing YAPI", e);
-      }
-      this.connect();
-    }, 500);
+    this._sendStatus();
   }
 
-  _startPolling() {
-    if (this.updateInterval) { 
-      clearInterval(this.updateInterval);
-    }
-    this.updateInterval = setInterval(() => this._update(), 1000 * (this.settings?.sensorPollingInterval || 5))
-  }
-
-  _stopPolling() {
-    if (this.updateInterval) {
-      clearInterval(this.updateInterval);
-    }
-    this.updateInterval = null;
+  _handleDeviceRemoval() {
+    this.sensorConnected = false;
+    this.sensor = null;
+    this.currentLux = null;
+    this.onReading(null);
+    this._stopPolling();
+    this._sendStatus();
+    this._scheduleReconnect();
   }
 
   async _update() {
-    if (!this.hubConnected) return;
+    if (!this.hubConnected || !this.sensorConnected || !this.sensor) return;
 
     try {
-      const res = await YAPI.UpdateDeviceList();
-      if (res !== YAPI.SUCCESS) {
-        // Connection lost
-        this.hubConnected = false;
-        this._sendStatus();
-        this._stopPolling();
-        this._scheduleReconnect();
-        return;
-      }
-
       await YAPI.HandleEvents();
-      this.hubConnected = true;
+      if (!await this.sensor.isOnline()) throw new Error("Light sensor is offline");
 
-      let sensor = this.sensor || YLightSensor.FirstLightSensor();
-      if (sensor && await sensor.isOnline()) {
-        this.sensorConnected = true;
-        this.currentLux = await sensor.get_currentRawValue();
-        this._applyBrightness();
-      } else {
-        this.sensorConnected = false;
-      }
+      const lux = await this.sensor.get_currentRawValue();
+      if (!Number.isFinite(lux) || lux < 0) throw new Error("Invalid lux value");
 
+      this.currentLux = lux;
+      this.onReading(lux);
       this._sendStatus();
-    } catch (err) {
-      console.error("Yocto polling error:", err);
-      this.hubConnected = false;
-      this._sendStatus();
+    } catch (error) {
+      console.error("Yocto polling error:", error);
+      this.sensorConnected = false;
+      this.currentLux = null;
+      this.onReading(null);
       this._stopPolling();
+      this._sendStatus();
       this._scheduleReconnect();
     }
   }
 
+  _startPolling() {
+    this._stopPolling();
+    const interval = 1000 * (Number(this.settings?.sensorPollingInterval) || 1);
+    this.updateInterval = setInterval(() => this._update(), interval);
+  }
+
+  _stopPolling() {
+    if (this.updateInterval) clearInterval(this.updateInterval);
+    this.updateInterval = null;
+  }
+
+  _scheduleReconnect() {
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    const delay = RECONNECT_DELAYS[Math.min(this.reconnectAttempt, RECONNECT_DELAYS.length - 1)];
+    this.reconnectAttempt++;
+    this.reconnectTimer = setTimeout(async () => {
+      this.reconnectTimer = null;
+      try {
+        await YAPI.FreeAPI();
+      } catch (error) {
+        console.error("Error freeing YAPI", error);
+      }
+      await this.connect();
+    }, delay);
+  }
+
   _sendStatus() {
-    if (this.sendToAllWindows) {
-      this.sendToAllWindows('light-sensor--yocto', {
-        hubConnected: this.hubConnected,
-        sensorConnected: this.sensorConnected,
-        lux: this.currentLux
-      });
-    }
+    this.sendStatus();
   }
 
-  _applyBrightness() {
-    if (this.currentLux === null || !this.sensorConnected || !this.monitors || !this.updateBrightnessThrottle || !this.settings.enabled) {
-      return;
-    }
-
-    const brightness = getBrightnessFromLux(this.currentLux);
-    if (brightness === this.lastAppliedBrightness) {
-      return;
-    }
-    this.lastAppliedBrightness = brightness;
-
-    applyMonitorBrightnessFromLux(this.currentLux, this.monitors, this.settings.monitorSettings, this.updateBrightnessThrottle);
-  }
-
-  _getStatus() {
+  getStatus() {
     return {
       hubConnected: this.hubConnected,
       sensorConnected: this.sensorConnected,
       lux: this.currentLux
     };
+  }
+
+  sendStatus(send = this.sendToAllWindows) {
+    send?.('light-sensor--yocto', this.getStatus());
   }
 }
 

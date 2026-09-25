@@ -6,6 +6,7 @@ const w32disp = require("win32-displayconfig");
 const wmibridge = require("wmi-bridge");
 const hdr = require("windows-hdr");
 const { exec } = require('child_process');
+const Utils = require('./Utils');
 require("os").setPriority(0, require("os").constants.priority.PRIORITY_BELOW_NORMAL)
 
 let lastDDCCIList = []
@@ -191,7 +192,7 @@ async function handleMonitorMessage(data) {
                 canEnrichCapabilities: !!(data.fullRefresh && shouldEnrichCapabilities())
             })
         } else if (data.type === "readKnownBrightness") {
-            const brightness = await readKnownBrightness()
+            const brightness = await readKnownBrightness(data.monitorIds)
             process.send({
                 type: 'knownBrightness',
                 brightness,
@@ -207,7 +208,16 @@ async function handleMonitorMessage(data) {
                 failed: !results
             })
         } else if (data.type === "brightness") {
-            setBrightness(data.brightness, data.id)
+            const success = await setBrightness(data.brightness, data.id)
+            if (data.requestId !== undefined) {
+                process.send({
+                    type: 'brightnessResult',
+                    requestId: data.requestId,
+                    id: data.id,
+                    brightness: data.brightness,
+                    success
+                })
+            }
         }  else if (data.type === "sdr") {
             setSDRBrightness(data.brightness, data.id)
         } else if (data.type === "gamma") {
@@ -603,15 +613,20 @@ refreshMonitors = async (fullRefresh = false, ddcciType = "default", alwaysSendU
 // This deliberately avoids rediscovering displays, scanning capabilities, or
 // refreshing feature values. Those operations remain the responsibility of a
 // normal monitor refresh.
-async function readKnownBrightness() {
+async function readKnownBrightness(monitorIds = false) {
     if (!monitors) return {}
 
     const result = {}
     const unreadableMonitorIds = new Set()
+    const requestedIds = Array.isArray(monitorIds) && monitorIds.length
+        ? new Set(monitorIds)
+        : false
+    const shouldRead = monitor => !requestedIds || requestedIds.has(monitor?.id)
 
     try {
         for (const hwid2 in monitors) {
             const monitor = monitors[hwid2]
+            if (!shouldRead(monitor)) continue
             if (monitor.type !== "ddcci" || !monitor.brightnessType) continue
 
             const refreshedMonitor = await getBrightnessDDC(monitor, false, true)
@@ -626,7 +641,10 @@ async function readKnownBrightness() {
     }
 
     // Internal display brightness (native WMI preferred, WMIC fallback)
-    if (canUseInternalBrightness()) {
+    const shouldReadInternal = !requestedIds || Object.values(monitors).some(monitor =>
+        monitor.type === "wmi" && shouldRead(monitor)
+    )
+    if (shouldReadInternal && canUseInternalBrightness()) {
         try {
             const wmiBrightness = await getBrightnessInternal()
             if (wmiBrightness) updateDisplay(monitors, wmiBrightness.hwid[2], wmiBrightness)
@@ -638,6 +656,7 @@ async function readKnownBrightness() {
     if (!appleStudioUnavailable) {
         for (const monitorKey in monitors) {
             const monitor = monitors[monitorKey]
+            if (!shouldRead(monitor)) continue
             if (monitor.type !== "studio-display") continue
             try {
                 const display = monitorsAppleStudio[monitorKey]
@@ -653,7 +672,7 @@ async function readKnownBrightness() {
         }
     }
 
-    if (!settings?.disableHDR) {
+    if (!requestedIds && !settings?.disableHDR) {
         try {
             monitorsHDR = await getHDRDisplays(monitors)
         } catch (e) {
@@ -666,6 +685,7 @@ async function readKnownBrightness() {
 
     for (const hwid2 in monitors) {
         const monitor = monitors[hwid2]
+        if (!shouldRead(monitor)) continue
         if (!monitor?.id || (monitor.type === "none" && !settings?.gammaAsMainSliderDisplays?.[hwid2])) continue
         if (unreadableMonitorIds.has(monitor.id)) continue
         result[monitor.id] = {
@@ -1670,49 +1690,57 @@ function setSDRBrightness(brightness, id) {
     }
 }
 
-function setBrightness(brightness, id) {
+async function setBrightness(brightness, id) {
     try {
-        if (id) {
-            let monitor = Object.values(monitors).find(mon => mon.id?.indexOf(id) >= 0)
-            if(monitor) {
-                // Check if user has set a custom brightness VCP code for this monitor
-                const hasCustomBrightnessVCP = monitor.hwid && ddcBrightnessVCPs[monitor.hwid[1]]
-                if (monitor.type == "studio-display") {
-                    setStudioDisplayBrightness(monitor.serial, brightness)
-                } else if (monitor.type === "software") {
-                    if (setSoftwareBrightness(monitor, brightness) === false) {
-                        console.log(`Couldn't set software brightness for monitor ${monitor.id}`)
-                        return false
-                    }
-                } else if(!settings.disableHighLevel && monitor.highLevelSupported?.brightness && !hasCustomBrightnessVCP) {
-                    setHighLevelBrightness(monitor.hwid.join("#"), brightness)
-                } else {
-                    setVCP(monitor.hwid.join("#"), monitor.brightnessType, brightness)
-                }
-                // Update tracked brightness values
-                const brightnessRaw = monitor.type === "software"
-                    ? Math.max(SOFTWARE_BRIGHTNESS_MIN, parseInt(brightness))
-                    : parseInt(brightness)
-                monitor.brightness = brightnessRaw * (100 / (monitor.brightnessMax || 100))
-                monitor.brightnessRaw = brightnessRaw
-                if(monitor.brightnessValues) monitor.brightnessValues[0] = brightnessRaw;
-            }
-        } else {
-            let monitor = Object.values(monitors).find(mon => mon.type == "wmi")
-            monitor.brightness = brightness
-            monitor.brightnessRaw = brightness
+        const monitor = id
+            ? Object.values(monitors).find(mon => mon.id === id || mon.id?.indexOf(id) >= 0)
+            : Object.values(monitors).find(mon => mon.type === "wmi")
+        if (!monitor) return false
+        const requested = Utils.quantizeBrightness(
+            brightness,
+            0,
+            monitor.type === "ddcci" ? (monitor.brightnessMax || 100) : 100
+        )
+
+        let result = true
+        if (monitor.type === "wmi") {
             if (canUseWmiBridgeNow()) {
-                // Set brightness via native WMI
-                wmibridge.setBrightness(brightness);
+                result = await wmibridge.setBrightness(requested)
             } else {
-                // If native WMI is unavailable, fall back to old method
-                exec(`powershell.exe -NoProfile (Get-WmiObject -Namespace root\\wmi -Class WmiMonitorBrightnessMethods).wmisetbrightness(0, ${brightness})`)
+                result = await new Promise(resolve => {
+                    exec(`powershell.exe -NoProfile (Get-WmiObject -Namespace root\\wmi -Class WmiMonitorBrightnessMethods).wmisetbrightness(0, ${requested})`, error => resolve(!error))
+                })
+            }
+        } else if (monitor.type === "studio-display") {
+            result = await setStudioDisplayBrightness(monitor.serial, requested)
+        } else if (monitor.type === "software") {
+            result = setSoftwareBrightness(monitor, requested) !== false
+        } else {
+            const hasCustomBrightnessVCP = monitor.hwid && ddcBrightnessVCPs[monitor.hwid[1]]
+            if(!settings.disableHighLevel && monitor.highLevelSupported?.brightness && !hasCustomBrightnessVCP) {
+                result = await setHighLevelBrightness(monitor.hwid.join("#"), requested)
+            } else {
+                result = await setVCP(monitor.hwid.join("#"), monitor.brightnessType, requested)
             }
         }
+
+        if (result === false) {
+            console.log(`Brightness write failed for ${monitor.id}: ${requested}`)
+            return false
+        }
+
+        const brightnessRaw = monitor.type === "software"
+            ? Math.max(SOFTWARE_BRIGHTNESS_MIN, requested)
+            : requested
+        monitor.brightness = brightnessRaw * (100 / (monitor.brightnessMax || 100))
+        monitor.brightnessRaw = brightnessRaw
+        if(monitor.brightnessValues) monitor.brightnessValues[0] = brightnessRaw;
+        return true
     } catch (e) {
         console.log(`Couldn't update brightness! [${id}]`);
         console.log(monitors)
         console.log(e)
+        return false
     }
 }
 

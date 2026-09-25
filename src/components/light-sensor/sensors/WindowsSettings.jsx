@@ -2,11 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { SettingsOption, SettingsChild } from "../../SettingsOption";
 
 export function WindowsSettings({ T }) {
-  const [windowsStatus, setWindowsStatus] = useState({
-    sensorsAvailable: [],
-    sensorCount: 0,
-    currentLux: null,
-  });
+  const [windowsStatus, setWindowsStatus] = useState(null);
 
   useEffect(() => {
     const handleWindowsStatus = (e, status) => {
@@ -14,6 +10,7 @@ export function WindowsSettings({ T }) {
     };
 
     window.ipc.on("light-sensor--windows", handleWindowsStatus);
+    window.ipc.send("request-light-sensor-status");
 
     return () => {
       window.ipc.removeListener("light-sensor--windows", handleWindowsStatus);
@@ -21,6 +18,9 @@ export function WindowsSettings({ T }) {
   }, []);
 
   const sensorMessage = useMemo(() => {
+    if (!windowsStatus) {
+      return <p>{T.t("SETTINGS_LIGHT_SENSOR_WINDOWS_CHECKING")}</p>;
+    }
     if (windowsStatus.sensorCount === 0) {
       return (
         <p>
@@ -39,11 +39,11 @@ export function WindowsSettings({ T }) {
         </span>
       </p>
     );
-  }, [windowsStatus.sensorCount, T]);
+  }, [windowsStatus, T]);
 
   const sensorList = useMemo(() => {
     if (
-      windowsStatus.sensorsAvailable &&
+      windowsStatus?.sensorsAvailable &&
       windowsStatus.sensorsAvailable.length > 0
     ) {
       return (
@@ -62,7 +62,7 @@ export function WindowsSettings({ T }) {
       );
     }
     return null;
-  }, [windowsStatus.sensorsAvailable, T]);
+  }, [windowsStatus?.sensorsAvailable, T]);
 
   return (
     <>
@@ -70,7 +70,7 @@ export function WindowsSettings({ T }) {
         <SettingsChild>
           <div>
             {sensorMessage}
-            {windowsStatus.currentLux !== null && windowsStatus.sensorCount > 0 ? (
+            {windowsStatus && windowsStatus.currentLux !== null && windowsStatus.sensorCount > 0 ? (
               <p>
                 <strong>{T.t("SETTINGS_LIGHT_SENSOR_WINDOWS_CURRENT")}</strong> {windowsStatus.currentLux.toFixed(1)} {T.t("GENERIC_LUX")}
               </p>

@@ -84,11 +84,12 @@ function requestAccent() {
 }
 
 // Send brightness update request. Params are the monitor's index in the array and requested brightness level.
-function updateBrightness(index, level) {
+function updateBrightness(index, level, manual = false) {
     if (!window.showPanel) return false;
     ipc.send('update-brightness', {
         index,
-        level
+        level,
+        manual
     })
 }
 
@@ -127,6 +128,15 @@ function sendSettings(newSettings) {
         newSettings,
         sendUpdate: true
     })
+}
+
+function previewPanelBrightness(data) {
+    if (!window.showPanel) return false
+    ipc.send('preview-panel-brightness', data)
+}
+
+function setAutoBrightnessEnabled(enabled) {
+    ipc.send('set-auto-brightness-enabled', enabled)
 }
 
 function requestSettings() {
@@ -210,6 +220,14 @@ ipc.on("monitors-updated", (e, monitors) => {
         detail: monitors
     }))
 })
+
+ipc.on("light-sensor-status", (event, status) => {
+    window.lightSensorStatus = status
+    window.dispatchEvent(new CustomEvent('lightSensorStatusUpdated', {
+        detail: status
+    }))
+})
+
 ipc.on("force-refresh-monitors", (e) => {
     window.allMonitors = {}
     ipc.send('full-refresh', true)
@@ -430,9 +448,11 @@ window.addEventListener("setVCP", e => {
 
 window.ipc = ipc
 window.updateBrightness = updateBrightness
+window.previewPanelBrightness = previewPanelBrightness
 window.requestMonitors = requestMonitors
 window.openSettings = openSettings
 window.sendSettings = sendSettings
+window.setAutoBrightnessEnabled = setAutoBrightnessEnabled
 window.requestSettings = requestSettings
 window.pauseMonitorUpdates = pauseMonitorUpdates
 window.installUpdate = installUpdate

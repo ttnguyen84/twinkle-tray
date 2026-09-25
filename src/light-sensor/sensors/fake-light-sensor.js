@@ -1,33 +1,29 @@
-const { applyMonitorBrightnessFromLux } = require('../light-sensor.utilts');
-
 class FakeLightSensor {
   constructor() {
     this.name = 'fake';
     this.settings = null;
-    this.monitors = null;
     this.sendToAllWindows = null;
-    this.updateBrightnessThrottle = null;
+    this.onReading = null;
   }
 
-  initialize(settings, monitors, sendToAllWindows, updateBrightnessThrottle) {
+  initialize(settings, sendToAllWindows, onReading) {
     this.settings = settings
-    this.monitors = monitors
     this.sendToAllWindows = sendToAllWindows
-    this.updateBrightnessThrottle = updateBrightnessThrottle
+    this.onReading = onReading
   }
 
   async reconnect() { }
 
-  async changeSettings(settings) {
+  async changeSettings(settings, previous = {}) {
     this.settings = settings;
-    if (!this.settings.enabled) {
-      return;
+    if (this.settings.enabled && settings.sensors.fake.overriddenLux !== previous.sensors?.fake?.overriddenLux) {
+      this.onReading(settings.sensors.fake.overriddenLux);
     }
-
-    applyMonitorBrightnessFromLux(settings.sensors.fake.overriddenLux, this.monitors, settings.monitorSettings, this.updateBrightnessThrottle);
   }
 
-  async connect() { }
+  async connect() {
+    this.onReading(this.settings.sensors.fake.overriddenLux);
+  }
 
   async disconnect() { }
 }

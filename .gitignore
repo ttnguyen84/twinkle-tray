@@ -25,3 +25,4 @@ logs/
 cache/
 debug.log
 bin/
+/BuildOutput/

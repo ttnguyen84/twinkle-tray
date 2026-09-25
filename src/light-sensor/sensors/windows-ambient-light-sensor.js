@@ -1,24 +1,43 @@
-const { applyMonitorBrightnessFromLux, getBrightnessFromLux } = require('../light-sensor.utilts');
 const { getAmbientLightSensors, getLuxValue } = require("windows-ambient-sensor");
+
+const MAX_READ_ERRORS = 3;
+const REDISCOVER_DELAY = 60000;
 
 class WindowsAmbientLightSensor {
   constructor() {
     this.name = 'windows';
     this.settings = null;
-    this.monitors = null;
     this.sendToAllWindows = null;
-    this.updateBrightnessThrottle = null;
+    this.onReading = null;
     this.interval = null;
+    this.rediscoverTimer = null;
     this.sensorsAvailable = [];
+    this.selectedSensorId = null;
     this.currentLux = null;
-    this.lastAppliedBrightness = null;
+    this.readErrors = 0;
+    this.bursting = false;
   }
 
-  initialize(settings, monitors, sendToAllWindows, updateBrightnessThrottle) {
+  initialize(settings, sendToAllWindows, onReading) {
     this.settings = settings;
-    this.monitors = monitors;
     this.sendToAllWindows = sendToAllWindows;
-    this.updateBrightnessThrottle = updateBrightnessThrottle;
+    this.onReading = onReading;
+  }
+
+  async changeSettings(settings, previous = {}) {
+    const intervalChanged = settings.sensorPollingInterval !== previous.sensorPollingInterval;
+    this.settings = settings;
+    if (this.interval && intervalChanged) this._startPolling();
+  }
+
+  async connect() {
+    console.log("Windows Ambient Light Sensor: Starting...");
+    if (!this._discoverSensors()) {
+      this._scheduleRediscovery();
+      return;
+    }
+    this._pollLux();
+    this._startPolling();
   }
 
   async reconnect() {
@@ -26,88 +45,123 @@ class WindowsAmbientLightSensor {
     await this.connect();
   }
 
-  async changeSettings(settings) {
-    this.settings = settings;
-    await this.disconnect();
-    await this.connect();
-  }
-
-  async connect() {
-    console.log("Windows Ambient Light Sensor: Starting...");
-    this._pollSensors();
-    this.interval = setInterval(() => {
-      this._pollSensors();
-    }, 1000 * (this.settings?.sensorPollingInterval || 5));
-  }
-
   async disconnect() {
-    if (this.interval) {
-      clearInterval(this.interval);
-      this.interval = null;
-    }
+    this._stopPolling();
+    if (this.rediscoverTimer) clearTimeout(this.rediscoverTimer);
+    this.rediscoverTimer = null;
     this.sensorsAvailable = [];
+    this.selectedSensorId = null;
     this.currentLux = null;
-    this.lastAppliedBrightness = null;
+    this.readErrors = 0;
+    this.onReading(null);
     this._sendStatus();
     console.log("Windows Ambient Light Sensor: Stopped");
   }
 
-  _sendStatus() {
-    if (this.sendToAllWindows) {
-      this.sendToAllWindows('light-sensor--windows', {
-        sensorsAvailable: this.sensorsAvailable,
-        sensorCount: this.sensorsAvailable.length,
-        currentLux: this.currentLux
-      });
+  _discoverSensors() {
+    const startedAt = Date.now();
+    try {
+      this.sensorsAvailable = getAmbientLightSensors();
+      this.selectedSensorId = this.sensorsAvailable[0]?.id ?? null;
+      this.readErrors = 0;
+      this._sendStatus();
+      console.log(`Windows Ambient Light Sensor: discovered ${this.sensorsAvailable.length} sensor(s) in ${Date.now() - startedAt}ms`);
+      return this.sensorsAvailable.length > 0;
+    } catch (error) {
+      console.error("Windows Ambient Light Sensor discovery error:", error);
+      this.sensorsAvailable = [];
+      this.selectedSensorId = null;
+      this._sendStatus();
+      return false;
     }
   }
 
-  _pollSensors() {
+  _pollLux() {
+    if (this.sensorsAvailable.length === 0 || this.bursting) return;
     try {
-      const sensors = getAmbientLightSensors();
-      this.sensorsAvailable = sensors;
-
-      if (sensors.length === 0) {
-        this.currentLux = null;
-        this._sendStatus();
-        return;
-      }
-
-      const lux = getLuxValue();
-      if (typeof lux === 'number' && Number.isFinite(lux) && lux >= 0) {
-        this.currentLux = lux;
-        console.log('Windows sensor - Current Lux:', lux);
-        this._applyBrightness();
-      } else {
-        this.currentLux = null;
-      }
-
+      const lux = this._readLux();
+      if (!Number.isFinite(lux) || lux < 0) throw new Error("Invalid lux value");
+      this.currentLux = lux;
+      this.readErrors = 0;
+      this.onReading(lux);
       this._sendStatus();
     } catch (error) {
-      console.error("Windows Ambient Light Sensor error:", error);
-      this.sensorsAvailable = [];
-      this.currentLux = null;
-      this._sendStatus();
+      this.readErrors++;
+      console.error("Windows Ambient Light Sensor read error:", error);
+      if (this.readErrors >= MAX_READ_ERRORS) {
+        this.currentLux = null;
+        this.sensorsAvailable = [];
+        this.selectedSensorId = null;
+        this.onReading(null);
+        this._stopPolling();
+        this._sendStatus();
+        this._scheduleRediscovery();
+      }
     }
   }
 
-  _applyBrightness() {
-    if (this.currentLux === null || !this.monitors || !this.updateBrightnessThrottle || !this.settings || !this.settings.enabled) {
-      return;
+  _startPolling() {
+    this._stopPolling();
+    const interval = 1000 * (Number(this.settings?.sensorPollingInterval) || 1);
+    this.interval = setInterval(() => this._pollLux(), interval);
+  }
+
+  _readLux() {
+    return getLuxValue(this.selectedSensorId);
+  }
+
+  async sampleBurst(duration = 1000, interval = 100) {
+    if (this.sensorsAvailable.length === 0) return [];
+    this.bursting = true;
+    const samples = [];
+    const startedAt = Date.now();
+
+    try {
+      while (Date.now() - startedAt < duration) {
+        const lux = this._readLux();
+        if (Number.isFinite(lux) && lux >= 0) samples.push(lux);
+        await new Promise(resolve => setTimeout(resolve, interval));
+      }
+    } finally {
+      this.bursting = false;
     }
 
-    const brightness = getBrightnessFromLux(this.currentLux);
-    if (brightness === this.lastAppliedBrightness) {
-      return;
-    }
-    this.lastAppliedBrightness = brightness;
+    if (samples.length > 0) this.currentLux = samples[samples.length - 1];
+    return samples;
+  }
 
-    applyMonitorBrightnessFromLux(
-      this.currentLux,
-      this.monitors,
-      this.settings.monitorSettings,
-      this.updateBrightnessThrottle
-    );
+  _stopPolling() {
+    if (this.interval) clearInterval(this.interval);
+    this.interval = null;
+  }
+
+  _scheduleRediscovery() {
+    if (this.rediscoverTimer) clearTimeout(this.rediscoverTimer);
+    this.rediscoverTimer = setTimeout(() => {
+      this.rediscoverTimer = null;
+      if (this._discoverSensors()) {
+        this._pollLux();
+        this._startPolling();
+      } else {
+        this._scheduleRediscovery();
+      }
+    }, REDISCOVER_DELAY);
+  }
+
+  _sendStatus() {
+    this.sendStatus();
+  }
+
+  getStatus() {
+    return {
+      sensorsAvailable: this.sensorsAvailable,
+      sensorCount: this.sensorsAvailable.length,
+      currentLux: this.currentLux
+    };
+  }
+
+  sendStatus(send = this.sendToAllWindows) {
+    send?.('light-sensor--windows', this.getStatus());
   }
 }
 

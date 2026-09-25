@@ -148,6 +148,13 @@ ipc.on("monitors-updated", (e, monitors) => {
     }))
 })
 
+ipc.on("light-sensor-status", (event, status) => {
+    window.lightSensorStatus = status
+    window.dispatchEvent(new CustomEvent('lightSensorStatusUpdated', {
+        detail: status
+    }))
+})
+
 // Accent colors recieved
 ipc.on('update-colors', (event, data) => {
     window.document.body.style.setProperty("--system-accent-color", data.accent.hex)
@@ -290,6 +297,7 @@ window.lastUpdate = Date.now()
 window.showPanel = false
 window.reactReady = false
 window.settings = getArgumentVars().settings
+window.lightSensorStatus = null
 window.accent = "cyan"
 window.getSunCalcTimes = getSunCalcTimes
 
