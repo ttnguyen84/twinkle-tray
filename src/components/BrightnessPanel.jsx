@@ -273,11 +273,11 @@ const BrightnessPanel = memo(function BrightnessPanel() {
   }
 
   return (
-    <div className="window-base" data-theme={window.settings.theme || "default"} id="panel" data-refreshing={state.isRefreshing}>
+    <div className="window-base" data-theme={window.settings?.theme || "default"} id="panel" data-refreshing={state.isRefreshing}>
       <div className="titlebar">
         <div className="title">{T.t("PANEL_TITLE")}</div>
         <div className="icons">
-          {window.settings.sleepAction !== "none"
+          {window.settings?.sleepAction !== "none"
             ? <div title={T.t("PANEL_BUTTON_TURN_OFF_DISPLAYS")} className="off" onClick={window.turnOffDisplays}>&#xF71D;</div>
             : null}
           <div title={T.t("GENERIC_SETTINGS")} className="settings" onClick={window.openSettings}>&#xE713;</div>

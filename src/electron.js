@@ -4057,7 +4057,9 @@ function createPanel(toggleOnLoad = false, isRefreshing = false, showOnLoad = tr
         appVersion: appVersion,
         appVersionTag: appVersionTag,
         appBuild: appBuildShort,
-        isRefreshing: isRefreshing
+        isRefreshing: isRefreshing,
+        settings: settings,
+        lastTheme: lastTheme
       })).toString('base64')],
       allowRunningInsecureContent: true,
       webSecurity: false

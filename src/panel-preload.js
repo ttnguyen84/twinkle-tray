@@ -31,6 +31,12 @@ function getArgumentVars() {
     }
 }
 
+let settings = getArgumentVars().settings || {}
+window.settings = settings
+window.showPanel = false
+window.isAcrylic = false
+window.isTransparent = false
+
 // Show or hide the brightness panel
 function setPanelVisibility(visible) {
     window.showPanel = visible
@@ -41,14 +47,18 @@ function setPanelVisibility(visible) {
         window.dispatchEvent(new CustomEvent('sleepUpdated', {
             detail: false
         }))
-        if (!settings.useNativeAnimation) {
+        if (!window.settings?.useNativeAnimation) {
             setTimeout(() => {
                 if (window.showPanel) {
                     ipc.send('show-acrylic')
                 }
             }, 500)
         }
-        window.updateMica?.()
+        try {
+            window.updateMica?.()
+        } catch(e) {
+            console.error(e)
+        }
     } else {
         setPriority(0, priority.PRIORITY_BELOW_NORMAL)
         window.document.body.dataset["visible"] = false
@@ -67,7 +77,10 @@ function setPanelVisibility(visible) {
         window.isAcrylic = false
     }
 
-    window.document.getElementById("root").dataset["visible"] = window.showPanel
+    const root = window.document.getElementById("root")
+    if (root) {
+        root.dataset["visible"] = window.showPanel ? "true" : "false"
+    }
     window.sleep = !visible
 
     // Blur all inputs to fix visual bugs
@@ -152,7 +165,7 @@ function pauseMonitorUpdates() {
 }
 
 function panelAnimationDone() {
-    if (showPanel === false) {
+    if (window.showPanel === false) {
         ipc.send('panel-hidden')
         window.sleep = true
         window.document.body.dataset["acrylicShow"] = false
@@ -275,17 +288,18 @@ ipc.on('isRefreshing', (event, newValue) => {
 })
 
 // Settings recieved
-ipc.on('settings-updated', (event, settings) => {
-    if (settings.isDev == false) {
+ipc.on('settings-updated', (event, newSettings) => {
+    if (newSettings.isDev == false) {
         // Keep forwarding to the main process session log; stay quiet in DevTools
         console.log = (...e) => { e.forEach((c) => ipc.send('log', c)) }
     } else {
         console.log = (...e) => { e.forEach((c) => { ipc.send('log', c); con.log(c) }) }
     }
-    window.settings = settings
+    settings = newSettings
+    window.settings = newSettings
     detectSunValley()
     window.dispatchEvent(new CustomEvent('settingsUpdated', {
-        detail: settings
+        detail: newSettings
     }))
 })
 
@@ -324,12 +338,12 @@ ipc.on('theme-settings', (event, theme) => {
     try {
         window.theme = (theme.SystemUsesLightTheme == 0 ? "dark" : "light")
         window.document.body.dataset["systemTheme"] = (theme.SystemUsesLightTheme == 0 ? "dark" : "light")
-        window.document.body.dataset["theme"] = (settings.theme == "dark" || settings.theme == "light" ? settings.theme : window.theme)
+        window.document.body.dataset["theme"] = (window.settings?.theme == "dark" || window.settings?.theme == "light" ? window.settings.theme : window.theme)
         window.document.body.dataset["transparent"] = (theme.EnableTransparency == 0 || theme.UseAcrylic == 0 ? "false" : "true")
-        window.document.body.dataset["acrylic"] = (theme.UseAcrylic == 0 || settings?.isWin11 ? "false" : "true")
+        window.document.body.dataset["acrylic"] = (theme.UseAcrylic == 0 || window.settings?.isWin11 ? "false" : "true")
         window.document.body.dataset["coloredTaskbar"] = (theme.ColorPrevalence == 0 ? "false" : "true")
-        window.document.body.dataset["useNativeAnimation"] = (settings.useNativeAnimation == false ? "false" : "true")
-        isTransparent = theme.EnableTransparency
+        window.document.body.dataset["useNativeAnimation"] = (window.settings?.useNativeAnimation == false ? "false" : "true")
+        window.isTransparent = theme.EnableTransparency
     } catch (e) {
         window.document.body.dataset["systemTheme"] = "default"
         window.document.body.dataset["theme"] = "dark"
@@ -441,8 +455,8 @@ window.addEventListener("setVCP", e => {
     if(!window.showPanel) return false;
     const { monitor, code, value } = e.detail
     ipc.send("set-vcp", { monitor, code, value })
-    if(vcpMap[vcp] && monitor.features[vcpMap[vcp]]) {
-        monitor.features[vcpMap[vcp]][0] = level
+    if(vcpMap[code] && monitor.features?.[vcpMap[code]]) {
+        monitor.features[vcpMap[code]][0] = value
       }
 })
 
@@ -467,7 +481,7 @@ window.showPanel = false
 window.isAcrylic = false
 window.reactReady = false
 window.theme = "dark"
-window.settings = {}
+window.settings = window.settings || settings || {}
 window.jsVars = getArgumentVars()
 window.isRefreshing = getArgumentVars().isRefreshing
 window.isAppX = (getArgumentVars().appName == "twinkle-tray-appx" ? true : false)
