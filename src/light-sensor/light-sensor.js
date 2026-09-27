@@ -246,8 +246,13 @@ class LightSensor {
      */
     handleExternalBrightnessChange(monitorKey, detectedLevel) {
         if (!this.settings.enabled || !Number.isFinite(detectedLevel)) return;
+        const now = Date.now();
+        if (now < this.wakeGraceUntil) return;
+        if (now < this.lastWriteAt + 1000) return;
+
         const monitor = this._findMonitor(monitorKey);
         if (!monitor || !this.isEnabledForMonitor(monitor)) return;
+        if (this.ramps[monitor.key]) return;
 
         const level = clampBrightness(detectedLevel);
         console.log(`Light Sensor: external brightness change detected on ${monitorKey}: ${level}`);

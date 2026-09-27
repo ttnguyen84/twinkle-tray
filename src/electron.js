@@ -4182,6 +4182,7 @@ function createPanel(toggleOnLoad = false, isRefreshing = false, showOnLoad = tr
           isWindowsUserIdle = false
           console.log("Displays have woken up.")
           recentlyWokeUp = true
+          lightSensor.wakeGraceUntil = Date.now() + 5000
           handleMetricsChange("GUID_SESSION_USER_PRESENCE")
           if(!resumeRecoveryInProgress) clearRecentlyWokeUpLater()
         }
@@ -4194,13 +4195,18 @@ function createPanel(toggleOnLoad = false, isRefreshing = false, showOnLoad = tr
       // Internal display brightness change
       if(!settings.useGuidBrightnessEvent) return false;
       if(!ignoreBrightnessEvent) {
+        const isWakingOrIdle = isWindowsUserIdle || isUserIdle || recentlyWokeUp;
         for(const hwid2 in monitors) {
           const monitor = monitors[hwid2]
           if(monitor.type === "wmi") {
+            const hasChanged = !Number.isFinite(monitor.brightnessRaw)
+              || Math.abs(setting.data - monitor.brightnessRaw) >= 2;
             const normalized = normalizeBrightness(setting.data, true, monitor.min, monitor.max, monitor.calibration)
             monitor.brightness = normalized
             monitor.brightnessRaw = setting.data
-            lightSensor.handleExternalBrightnessChange(monitor.key, normalized)
+            if(hasChanged && !isWakingOrIdle) {
+              lightSensor.handleExternalBrightnessChange(monitor.key, normalized)
+            }
           }
           sendToAllWindows('monitors-updated', monitors)
         }
@@ -5946,6 +5952,7 @@ function idleCheckShort() {
         isUserIdle = false
         userIdleDimmed = false
         lastIdleTime = 1
+        lightSensor.wakeGraceUntil = Date.now() + 5000
 
         const block = blockBadDisplays("idle:end")
 

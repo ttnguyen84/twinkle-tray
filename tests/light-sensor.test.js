@@ -355,6 +355,49 @@ test('readback skipped after recent brightness write', async () => {
   assert.equal(monitor.brightness, 50, 'brightness unchanged');
 });
 
+test('handleExternalBrightnessChange skipped during wake grace period', () => {
+  const monitor = { id: 'M1', key: 'mon1', type: 'wmi', brightness: 50, brightnessRaw: 50 };
+  const sensor = createSensor([monitor]);
+  let learned = false;
+  sensor.learnLinkLevel = () => { learned = true; };
+  sensor.wakeGraceUntil = Date.now() + 5000;
+  sensor.lastWriteAt = 0;
+
+  sensor.handleExternalBrightnessChange('mon1', 82);
+
+  assert.equal(learned, false, 'should not learn during wake grace period');
+  assert.equal(sensor.manualPauseUntil, 0, 'manual pause not triggered');
+});
+
+test('handleExternalBrightnessChange skipped after recent brightness write', () => {
+  const monitor = { id: 'M1', key: 'mon1', type: 'wmi', brightness: 50, brightnessRaw: 50 };
+  const sensor = createSensor([monitor]);
+  let learned = false;
+  sensor.learnLinkLevel = () => { learned = true; };
+  sensor.wakeGraceUntil = 0;
+  sensor.lastWriteAt = Date.now();
+
+  sensor.handleExternalBrightnessChange('mon1', 82);
+
+  assert.equal(learned, false, 'should not learn after recent brightness write');
+  assert.equal(sensor.manualPauseUntil, 0, 'manual pause not triggered');
+});
+
+test('handleExternalBrightnessChange skipped while ramp is active', () => {
+  const monitor = { id: 'M1', key: 'mon1', type: 'wmi', brightness: 50, brightnessRaw: 50 };
+  const sensor = createSensor([monitor]);
+  let learned = false;
+  sensor.learnLinkLevel = () => { learned = true; };
+  sensor.wakeGraceUntil = 0;
+  sensor.lastWriteAt = 0;
+  sensor.ramps['mon1'] = { targetBrightness: 60 };
+
+  sensor.handleExternalBrightnessChange('mon1', 55);
+
+  assert.equal(learned, false, 'should not learn while ramp is active');
+  assert.equal(sensor.manualPauseUntil, 0, 'manual pause not triggered');
+});
+
 // --- Daytime Lux Boost tests ---
 
 test('getDaytimeLuxOffset returns 0 when disabled', () => {
