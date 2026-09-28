@@ -511,7 +511,9 @@ function stopMonitorThread() {
   if(monitorsThreadStopPromise && monitorsThreadStopTarget === thread) return monitorsThreadStopPromise;
 
   const stopPromise = new Promise((resolve, reject) => {
+    let timeoutId = null
     const cleanup = () => {
+      if (timeoutId) clearTimeout(timeoutId)
       thread.removeListener("exit", handleExit)
       thread.removeListener("close", handleExit)
     }
@@ -523,6 +525,20 @@ function stopMonitorThread() {
 
     thread.once("exit", handleExit)
     thread.once("close", handleExit)
+
+    // Force termination and cleanup if thread fails to exit within 3.5s
+    timeoutId = setTimeout(() => {
+      console.warn("stopMonitorThread: Worker process did not exit in time. Forcing cleanup.")
+      cleanup()
+      try {
+        if (thread.pid) {
+          process.kill(thread.pid, "SIGKILL")
+        }
+      } catch (e) {}
+      if(monitorsThreadReal === thread) monitorsThreadReal = undefined
+      resolve()
+    }, 3500)
+    if (timeoutId.unref) timeoutId.unref()
 
     try {
       if(!thread.kill()) {
@@ -4115,6 +4131,16 @@ function createPanel(toggleOnLoad = false, isRefreshing = false, showOnLoad = tr
     }
   })
 
+  mainWindow.webContents.on('render-process-gone', (event, details) => {
+    console.warn("Panel render-process-gone:", details)
+    restartPanel(false)
+  })
+
+  mainWindow.webContents.on('unresponsive', () => {
+    console.warn("Panel renderer became unresponsive")
+    restartPanel(false)
+  })
+
   mainWindow.on('move', (e) => {
     try {
       e.preventDefault()
@@ -4285,7 +4311,11 @@ function restartPanel(show = false) {
 }
 
 function getPrimaryDisplay() {
-  let displays = screen.getAllDisplays()
+  let displays = []
+  try {
+    displays = screen.getAllDisplays() || []
+  } catch (e) { }
+
   // Use coordinate (0,0) to choose the primary display.
   let primaryDisplay = displays.find((display) => {
     return display.bounds.x == 0 && display.bounds.y == 0
@@ -4299,13 +4329,30 @@ function getPrimaryDisplay() {
   if (tray) {
     try {
       let trayBounds = tray.getBounds()
-      let foundDisplay = displays.find(d => {
-        return (trayBounds.x >= d.bounds.x && trayBounds.x <= d.bounds.x + d.bounds.width && trayBounds.y >= d.bounds.y && trayBounds.y <= d.bounds.y + d.bounds.height)
-      })
-      if (foundDisplay) primaryDisplay = foundDisplay;
+      if (trayBounds && (trayBounds.width > 0 || trayBounds.height > 0)) {
+        let foundDisplay = displays.find(d => {
+          return (trayBounds.x >= d.bounds.x && trayBounds.x <= d.bounds.x + d.bounds.width && trayBounds.y >= d.bounds.y && trayBounds.y <= d.bounds.y + d.bounds.height)
+        })
+        if (foundDisplay) primaryDisplay = foundDisplay;
+      }
     } catch (e) { }
   }
-  return primaryDisplay
+
+  if (!primaryDisplay) {
+    try {
+      primaryDisplay = screen.getPrimaryDisplay()
+    } catch (e) { }
+  }
+
+  if (!primaryDisplay && displays.length > 0) {
+    primaryDisplay = displays[0]
+  }
+
+  return primaryDisplay || {
+    bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+    workArea: { x: 0, y: 0, width: 1920, height: 1040 },
+    scaleFactor: 1
+  }
 }
 
 
@@ -4316,6 +4363,7 @@ let detectedTaskbarHide = false
 let canReposition = true
 function repositionPanel() {
   try {
+    if (!mainWindow || mainWindow.isDestroyed()) return false;
 
     if (!canReposition) {
       mainWindow.setBounds({
@@ -4327,10 +4375,8 @@ function repositionPanel() {
     let primaryDisplay = getPrimaryDisplay()
 
     const taskbarPosition = () => {
-      let primaryDisplay = getPrimaryDisplay()
-
-      const bounds = primaryDisplay.bounds
-      const workArea = primaryDisplay.workArea
+      const bounds = primaryDisplay.bounds || { x: 0, y: 0, width: 1920, height: 1080 }
+      const workArea = primaryDisplay.workArea || bounds
       let gap = 0
       let position = "BOTTOM"
       if (bounds.x < workArea.x) {
@@ -4348,10 +4394,10 @@ function repositionPanel() {
       }
 
       // Use taskbar position from registry if auto-hide is on
-      if (detectedTaskbarHide) {
+      if (detectedTaskbarHide && detectedTaskbarPos) {
         position = detectedTaskbarPos
         if (position === "TOP" || position === "BOTTOM") {
-          gap = detectedTaskbarHeight
+          gap = detectedTaskbarHeight || gap
         }
       }
 
@@ -4364,7 +4410,6 @@ function repositionPanel() {
 
       if (typeof settings.overrideTaskbarGap === "number") {
         gap = settings.overrideTaskbarGap
-        console.log(gap)
       }
 
       return { position, gap }
@@ -4374,48 +4419,52 @@ function repositionPanel() {
     panelSize.taskbar = taskbar
     sendToAllWindows('taskbar', taskbar)
 
-    if (mainWindow && !isAnimatingPanel) {
+    if (mainWindow && !mainWindow.isDestroyed() && !isAnimatingPanel) {
+      const bounds = primaryDisplay.bounds || { x: 0, y: 0, width: 1920, height: 1080 }
+      const workArea = primaryDisplay.workArea || bounds
+
       // Check if taskbar is actually taking up space on the primary display.
-      // This handles per-monitor auto-hide mods (e.g., Windhawk) where the global
-      // auto-hide registry setting doesn't reflect the actual state on each monitor.
       const taskbarActuallyHidden = (taskbar.position === "BOTTOM" || taskbar.position === "TOP")
-        ? primaryDisplay.bounds.height === primaryDisplay.workArea.height
-        : primaryDisplay.bounds.width === primaryDisplay.workArea.width
+        ? bounds.height === workArea.height
+        : bounds.width === workArea.width
+
+      let targetX
+      let targetY
 
       if (taskbar.position == "LEFT") {
-        mainWindow.setBounds({
-          width: panelSize.width,
-          height: panelSize.height,
-          x: primaryDisplay.bounds.x + taskbar.gap,
-          y: primaryDisplay.bounds.y + primaryDisplay.workArea.height - panelSize.height
-        })
+        targetX = bounds.x + taskbar.gap
+        targetY = bounds.y + workArea.height - panelSize.height
       } else if (taskbar.position == "TOP") {
-        mainWindow.setBounds({
-          width: panelSize.width,
-          height: panelSize.height,
-          x: primaryDisplay.bounds.x + primaryDisplay.workArea.width - panelSize.width,
-          y: primaryDisplay.bounds.y + taskbar.gap
-        })
+        targetX = bounds.x + workArea.width - panelSize.width
+        targetY = bounds.y + taskbar.gap
       } else if (taskbarActuallyHidden && taskbar.position == "BOTTOM") {
-        // Edge case for auto-hide taskbar (taskbar is truly hidden, not taking up space)
-        mainWindow.setBounds({
-          width: panelSize.width,
-          height: panelSize.height,
-          x: primaryDisplay.bounds.x + primaryDisplay.workArea.width - panelSize.width,
-          y: primaryDisplay.bounds.y + primaryDisplay.workArea.height - panelSize.height - taskbar.gap
-        })
+        targetX = bounds.x + workArea.width - panelSize.width
+        targetY = bounds.y + workArea.height - panelSize.height - taskbar.gap
       } else {
-        mainWindow.setBounds({
-          width: panelSize.width,
-          height: panelSize.height,
-          x: primaryDisplay.bounds.x + primaryDisplay.workArea.width - panelSize.width,
-          y: primaryDisplay.bounds.y + primaryDisplay.bounds.height - panelSize.height - taskbar.gap
-        })
+        targetX = bounds.x + workArea.width - panelSize.width
+        targetY = bounds.y + bounds.height - panelSize.height - taskbar.gap
       }
+
+      // Clamp coordinates within visible bounds of the chosen display
+      const minX = bounds.x
+      const maxX = Math.max(bounds.x, bounds.x + bounds.width - panelSize.width)
+      const minY = bounds.y
+      const maxY = Math.max(bounds.y, bounds.y + bounds.height - panelSize.height)
+      targetX = Math.max(minX, Math.min(maxX, targetX))
+      targetY = Math.max(minY, Math.min(maxY, targetY))
+
+      mainWindow.setBounds({
+        width: panelSize.width,
+        height: panelSize.height,
+        x: Math.round(targetX),
+        y: Math.round(targetY)
+      })
       panelSize.base = mainWindow.getBounds().y
     }
 
-    sendToAllWindows('panel-position', mainWindow.getPosition())
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      sendToAllWindows('panel-position', mainWindow.getPosition())
+    }
   } catch (e) {
     console.log("Couldn't reposition panel", e)
   }
@@ -4565,72 +4614,82 @@ let easeOutQuad = t => 1 + (--t) * t * t * t * t
 
 // Set brightness panel state (visible or not)
 function showPanel(show = true, height = 300) {
+  try {
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      if (show) createPanel(true)
+      return
+    }
 
-  if (show) {
-    // Show panel
-    if (startHideTimeout) clearTimeout(startHideTimeout); // Reset "hide" timeout
-    startHideTimeout = null
-    mainWindow.restore()
-    mainWindowHandle = mainWindow.getNativeWindowHandle().readBigUInt64LE(0)
-    repositionPanel()
-    panelHeight = height
-    panelSize.visible = true
-
-    panelSize.bounds = screen.dipToScreenRect(mainWindow, mainWindow.getBounds())
-    panelSize.bounds = mainWindow.getBounds()
-    primaryDPI = screen.getPrimaryDisplay().scaleFactor
-    panelHeight = panelHeight * primaryDPI
-
-    if (settings.useNativeAnimation && settings.useAcrylic && lastTheme.EnableTransparency) {
-      // Acrylic + Native Animation
-      if (lastTheme && lastTheme.ColorPrevalence) {
-        tryVibrancy(mainWindow, { theme: getAccentColors().dark + (settings.useAcrylic ? "D0" : "70"), effect: (settings.useAcrylic ? "acrylic" : "blur") })
-      } else {
-        tryVibrancy(mainWindow, { theme: (lastTheme && lastTheme.SystemUsesLightTheme ? (settings.useAcrylic ? "#DBDBDBDD" : "#DBDBDB70") : (settings.useAcrylic ? "#292929DD" : "#29292970")), effect: (settings.useAcrylic ? "acrylic" : "blur") })
+    if (show) {
+      // Show panel
+      if (startHideTimeout) clearTimeout(startHideTimeout); // Reset "hide" timeout
+      startHideTimeout = null
+      if (mainWindow.isMinimized()) {
+        mainWindow.restore()
       }
-      startPanelAnimation()
+      mainWindowHandle = mainWindow.getNativeWindowHandle().readBigUInt64LE(0)
+      repositionPanel()
+      panelHeight = height
+      panelSize.visible = true
+
+      panelSize.bounds = mainWindow.getBounds()
+      const currentDisplay = getPrimaryDisplay()
+      primaryDPI = currentDisplay?.scaleFactor || screen.getPrimaryDisplay()?.scaleFactor || 1
+      panelHeight = panelHeight * primaryDPI
+
+      if (settings.useNativeAnimation && settings.useAcrylic && lastTheme?.EnableTransparency) {
+        // Acrylic + Native Animation
+        if (lastTheme && lastTheme.ColorPrevalence) {
+          tryVibrancy(mainWindow, { theme: getAccentColors().dark + (settings.useAcrylic ? "D0" : "70"), effect: (settings.useAcrylic ? "acrylic" : "blur") })
+        } else {
+          tryVibrancy(mainWindow, { theme: (lastTheme && lastTheme.SystemUsesLightTheme ? (settings.useAcrylic ? "#DBDBDBDD" : "#DBDBDB70") : (settings.useAcrylic ? "#292929DD" : "#29292970")), effect: (settings.useAcrylic ? "acrylic" : "blur") })
+        }
+        startPanelAnimation()
+      } else {
+        // No blur, or CSS Animation
+        tryVibrancy(mainWindow, false)
+        mainWindow.setBackgroundColor("#00000000")
+        if (panelSize.taskbar?.position === "TOP") {
+          // Top
+          setWindowPos(mainWindowHandle, -2, panelSize.bounds.x * primaryDPI, ((panelSize.base) * primaryDPI), panelSize.bounds.width * primaryDPI, panelHeight, 0x0400)
+        } else {
+          // Bottom, left, right
+          mainWindow.show()
+          mainWindow.setBounds(panelSize.bounds)
+        }
+      }
+
+      setAlwaysOnTop(true)
+      mainWindow.focus()
+
+      // Resume mouse events if disabled
+      pauseMouseEvents(false)
+      mainWindow.setOpacity(1)
+      mainWindow.show()
+      sendToAllWindows('panel-position', mainWindow.getPosition())
+      sendToAllWindows("playPanelAnimation")
+
     } else {
-      // No blur, or CSS Animation
-      tryVibrancy(mainWindow, false)
-      mainWindow.setBackgroundColor("#00000000")
-      if (panelSize.taskbar.position === "TOP") {
-        // Top
-        setWindowPos(mainWindowHandle, -2, panelSize.bounds.x * primaryDPI, ((panelSize.base) * primaryDPI), panelSize.bounds.width * primaryDPI, panelHeight, 0x0400)
-      } else {
-        // Bottom, left, right
-        mainWindow.show()
-        mainWindow.setBounds(panelSize.bounds)
+      // Hide panel
+      commitPanelBrightnessSession()
+      setAlwaysOnTop(false)
+      panelSize.visible = false
+      clearInterval(panelAnimationInterval)
+      panelAnimationInterval = false
+      shouldAnimatePanel = false
+      isAnimatingPanel = false
+      sendToAllWindows("display-mode", "normal")
+      panelState = "hidden"
+      sendToAllWindows("closePanelAnimation")
+      if (!settings.useAcrylic || !settings.useNativeAnimation) {
+        tryVibrancy(mainWindow, false)
       }
+      // Pause mouse events
+      pauseMouseEvents(true)
+      if (typeof mainWindow.isVisible === "function" ? mainWindow.isVisible() : mainWindow.isVisible) startHidePanel();
     }
-
-    setAlwaysOnTop(true)
-    mainWindow.focus()
-
-    // Resume mouse events if disabled
-    pauseMouseEvents(false)
-    mainWindow.setOpacity(1)
-    mainWindow.show()
-    sendToAllWindows('panel-position', mainWindow.getPosition())
-    sendToAllWindows("playPanelAnimation")
-
-  } else {
-    // Hide panel
-    commitPanelBrightnessSession()
-    setAlwaysOnTop(false)
-    panelSize.visible = false
-    clearInterval(panelAnimationInterval)
-    panelAnimationInterval = false
-    shouldAnimatePanel = false
-    isAnimatingPanel = false
-    sendToAllWindows("display-mode", "normal")
-    panelState = "hidden"
-    sendToAllWindows("closePanelAnimation")
-    if (!settings.useAcrylic || !settings.useNativeAnimation) {
-      tryVibrancy(mainWindow, false)
-    }
-    // Pause mouse events
-    pauseMouseEvents(true)
-    if(mainWindow.isVisible) startHidePanel();
+  } catch(e) {
+    console.error("Couldn't show/hide panel", e)
   }
 }
 
@@ -4672,7 +4731,11 @@ async function startPanelAnimation() {
 
     // Get refresh rate of primary display
     // This allows the animation to play no more than the refresh rate
-    primaryRefreshRate = await refreshCtx.findVerticalRefreshRateForDisplayPoint(0, 0)
+    try {
+      primaryRefreshRate = await refreshCtx.findVerticalRefreshRateForDisplayPoint(0, 0)
+    } catch(e) {
+      primaryRefreshRate = 59.97
+    }
 
     // Start animation interval after a short delay
     // This avoids jank from React updating the DOM
@@ -5031,14 +5094,15 @@ function quitApp() {
 
 const toggleTray = async (doRefresh = true, isOverlay = false) => {
 
-  if (mainWindow == null) {
+  if (mainWindow == null || mainWindow.isDestroyed()) {
     createPanel(true)
     return false
   }
 
-  if (isRefreshing) {
-    //shouldShowPanel = true
-    //return false
+  // If panel is currently visible and this is not an overlay request, toggle it closed
+  if (!isOverlay && (panelSize.visible || panelState === "visible")) {
+    showPanel(false)
+    return false
   }
 
   if (doRefresh && !isOverlay && panelState !== "visible") {
@@ -5513,9 +5577,18 @@ function addEventListeners() {
   nativeTheme.on('updated', () => { if(!settings.disableThemeChanges) handleAccentChange(); })
 
   addDisplayChangeListener(() => { if(settings.useWin32Event) handleMonitorChange("win32") })
-  screen.addListener("display-added", () => { if(settings.useElectronEvents) handleMonitorChange("display-added") })
-  screen.addListener("display-removed", () => { if(settings.useElectronEvents) handleMonitorChange("display-removed") })
-  screen.addListener("display-metrics-changed", () => { if(settings.useElectronEvents) handleMetricsChange("display-metrics-changed") })
+  screen.addListener("display-added", () => {
+    if(settings.useElectronEvents) handleMonitorChange("display-added");
+    repositionPanel();
+  })
+  screen.addListener("display-removed", () => {
+    if(settings.useElectronEvents) handleMonitorChange("display-removed");
+    repositionPanel();
+  })
+  screen.addListener("display-metrics-changed", () => {
+    if(settings.useElectronEvents) handleMetricsChange("display-metrics-changed");
+    repositionPanel();
+  })
 
   enableMouseEvents()
 
@@ -5598,8 +5671,13 @@ function handleMonitorChange(t, e, d) {
   }
 
   if(resumeRecoveryInProgress) {
-    console.log(`Resume recovery is already handling ${t}.`)
-    return false
+    if (Date.now() - resumeRecoveryStartTime > 20000) {
+      console.warn("Resume recovery was stuck for >20s, clearing stuck flag.")
+      resumeRecoveryInProgress = false
+    } else {
+      console.log(`Resume recovery is already handling ${t}.`)
+      return false
+    }
   }
 
   console.log("Hardware change detected.")
@@ -5610,6 +5688,7 @@ function handleMonitorChange(t, e, d) {
   if (handleChangeTimeout2) {
     clearTimeout(handleChangeTimeout2)
   }
+  const delay = Math.max(500, parseInt(settings.hardwareRestoreSeconds ?? 5) * 1000)
   handleChangeTimeout2 = setTimeout(async () => {
     if(settings.recreateTray) recreateTray();
 
@@ -5626,12 +5705,13 @@ function handleMonitorChange(t, e, d) {
       restartPanel(false)
     }
 
+    repositionPanel()
     handleChangeTimeout2 = false
-  }, parseInt(settings.hardwareRestoreSeconds ?? 5) * 1000)
+  }, delay)
 
   setTimeout(() => {
     block.release()
-  }, parseInt(settings.hardwareRestoreSeconds ?? 5) * 1000)
+  }, delay)
 
 }
 
@@ -5641,6 +5721,7 @@ let recentlyWokeUp = false
 let recentlyWokeUpTimeout = false
 let resumeRecoveryInProgress = false
 let resumeRecoveryHandled = false
+let resumeRecoveryStartTime = 0
 function clearRecentlyWokeUpLater() {
   if(recentlyWokeUpTimeout) clearTimeout(recentlyWokeUpTimeout);
   recentlyWokeUpTimeout = setTimeout(() => {
@@ -5656,6 +5737,7 @@ powerMonitor.on("resume", async () => {
   recentlyWokeUp = true
   resumeRecoveryInProgress = true
   resumeRecoveryHandled = false
+  resumeRecoveryStartTime = Date.now()
   if(recentlyWokeUpTimeout) {
     clearTimeout(recentlyWokeUpTimeout)
     recentlyWokeUpTimeout = false
@@ -5750,8 +5832,13 @@ function handleMetricsChange(type) {
   console.log(`Event: handleMetricsChange (${type})`);
 
   if(resumeRecoveryInProgress) {
-    console.log(`Resume recovery is already handling ${type}.`)
-    return false
+    if (Date.now() - resumeRecoveryStartTime > 20000) {
+      console.warn("Resume recovery was stuck for >20s, clearing stuck flag in handleMetricsChange.")
+      resumeRecoveryInProgress = false
+    } else {
+      console.log(`Resume recovery is already handling ${type}.`)
+      return false
+    }
   }
 
   const block = blockBadDisplays("handleMetricsChange")
@@ -5760,6 +5847,7 @@ function handleMetricsChange(type) {
   if (handleChangeTimeout1) {
     clearTimeout(handleChangeTimeout1)
   }
+  const delay = Math.max(500, parseInt(settings.idleRestoreSeconds ?? 7) * 1000)
   handleChangeTimeout1 = setTimeout(async () => {
 
     // if handleMonitorChange is going to run, we don't need to do anything
@@ -5784,11 +5872,11 @@ function handleMetricsChange(type) {
     handleBackgroundUpdate(true) // Apply Time Of Day Adjustments
 
     handleChangeTimeout1 = false
-  }, parseInt(settings.idleRestoreSeconds ?? 7) * 1000)
+  }, delay)
 
   setTimeout(() => {
     block.release()
-  }, parseInt(settings.idleRestoreSeconds ?? 3) * 1000)
+  }, delay)
 }
 
 
