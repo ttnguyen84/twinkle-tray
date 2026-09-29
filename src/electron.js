@@ -460,15 +460,8 @@ function recoverMonitorThread(thread, error) {
   if (isAppQuitting || !thread || monitorsThreadStopTarget === thread) return Promise.resolve(false)
   if (monitorThreadRecoveryPromise) return monitorThreadRecoveryPromise
 
-  console.error(error)
-  if (!monitorsThreadFailed) {
-    monitorsThreadFailed = true
-    require('electron').dialog.showMessageBox(null, {
-      title: 'Monitors thread failed',
-      message: 'The monitors thread failed with the following message:',
-      detail: error?.message || error?.toString() || 'Unknown error',
-    }, () => { })
-  }
+  console.error("Monitors thread failure detected, recovering in background:", error)
+  monitorsThreadFailed = true
 
   if (monitorsThreadFailedResetTimer) {
     clearTimeout(monitorsThreadFailedResetTimer)
@@ -4189,7 +4182,32 @@ function createPanel(toggleOnLoad = false, isRefreshing = false, showOnLoad = tr
       console.log(`Event: ${setting.name || setting.guid} (${setting.data})`)
     }
 
-    if(setting.name === "GUID_SESSION_USER_PRESENCE") {
+    // Modern Standby / Sleep wake detection via Win32 Power Setting Notifications
+    if (setting.name === "GUID_LIDSWITCH_STATE_CHANGE") {
+      // 0 = closed, 1 = open. On some hardware opening lid emits 0 then 1, or just 0.
+      console.log(`Lid switch event: data=${setting.data}, recentlyWokeUp=${recentlyWokeUp}, resumeRecoveryHandled=${resumeRecoveryHandled}`)
+      if ((recentlyWokeUp && !resumeRecoveryHandled) || !monitorsThreadReady) {
+        handleSystemResume(`GUID_LIDSWITCH_STATE_CHANGE(${setting.data})`)
+      }
+    } else if (setting.name === "GUID_CONSOLE_DISPLAY_STATE" || setting.name === "GUID_SESSION_DISPLAY_STATUS") {
+      // 0 = off, 1 = on, 2 = dimmed
+      if (setting.data === 1 || setting.data === 2) {
+        console.log(`Display wake event: ${setting.name} (${setting.data})`)
+        isWindowsUserIdle = false
+        if ((recentlyWokeUp && !resumeRecoveryHandled) || !monitorsThreadReady) {
+          handleSystemResume(`${setting.name}(${setting.data})`)
+        }
+      }
+    } else if (setting.name === "GUID_MONITOR_POWER_ON") {
+      // 0 = off, 1 = on
+      if (setting.data === 1) {
+        console.log("Monitor power on event")
+        isWindowsUserIdle = false
+        if ((recentlyWokeUp && !resumeRecoveryHandled) || !monitorsThreadReady) {
+          handleSystemResume("GUID_MONITOR_POWER_ON")
+        }
+      }
+    } else if(setting.name === "GUID_SESSION_USER_PRESENCE") {
       if(!settings.useGuidPresenceEvent) return false;
       if(setting.data === 2) {
         // Idle
@@ -4204,13 +4222,17 @@ function createPanel(toggleOnLoad = false, isRefreshing = false, showOnLoad = tr
         isWindowsUserIdle = true
       } else if(setting.data === 0) {
         // Active
-        if(isWindowsUserIdle) {
+        if(isWindowsUserIdle || (recentlyWokeUp && !resumeRecoveryHandled)) {
           isWindowsUserIdle = false
-          console.log("Displays have woken up.")
-          recentlyWokeUp = true
-          lightSensor.wakeGraceUntil = Date.now() + 5000
-          handleMetricsChange("GUID_SESSION_USER_PRESENCE")
-          if(!resumeRecoveryInProgress) clearRecentlyWokeUpLater()
+          console.log("Displays have woken up via GUID_SESSION_USER_PRESENCE.")
+          if (recentlyWokeUp && !resumeRecoveryHandled && !resumeRecoveryInProgress) {
+            handleSystemResume("GUID_SESSION_USER_PRESENCE")
+          } else {
+            recentlyWokeUp = true
+            lightSensor.wakeGraceUntil = Date.now() + 5000
+            handleMetricsChange("GUID_SESSION_USER_PRESENCE")
+            if(!resumeRecoveryInProgress) clearRecentlyWokeUpLater()
+          }
         }
       }
     } else if(setting.name === "GUID_VIDEO_POWERDOWN_TIMEOUT") {
@@ -4905,7 +4927,14 @@ function createTray() {
   tray = new Tray(getTrayIconPath())
   tray.setToolTip('Twinkle Tray' + (isDev ? " (Dev)" : ""))
   setTrayMenu()
-  tray.on("click", async () => toggleTray(true))
+  tray.on("click", async () => {
+    try {
+      console.log("[TRAY] Click event received")
+      await toggleTray(true)
+    } catch (e) {
+      console.error("[TRAY] Error handling tray click:", e)
+    }
+  })
 
   let lastMouseMove = Date.now()
   tray.on('mouse-move', async () => {
@@ -5093,19 +5122,41 @@ function quitApp() {
 }
 
 const toggleTray = async (doRefresh = true, isOverlay = false) => {
+  const isActuallyVisible = Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && (panelSize.visible || panelState === "visible"))
+  console.log("toggleTray called", {
+    doRefresh,
+    isOverlay,
+    hasMainWindow: Boolean(mainWindow && !mainWindow.isDestroyed()),
+    isActuallyVisible,
+    panelSizeVisible: panelSize.visible,
+    panelState
+  })
 
-  if (mainWindow == null || mainWindow.isDestroyed()) {
-    createPanel(true)
+  if (mainWindow == null || mainWindow.isDestroyed() || !mainWindow.webContents || (mainWindow.webContents.isCrashed && mainWindow.webContents.isCrashed())) {
+    console.warn("mainWindow is null, destroyed, or crashed. Recreating panel...")
+    restartPanel(true)
     return false
   }
 
-  // If panel is currently visible and this is not an overlay request, toggle it closed
-  if (!isOverlay && (panelSize.visible || panelState === "visible")) {
+  // If panel is currently actually visible and this is not an overlay request, toggle it closed
+  if (!isOverlay && isActuallyVisible) {
     showPanel(false)
     return false
   }
 
-  if (doRefresh && !isOverlay && panelState !== "visible") {
+  // If internal flags thought it was visible but the OS window wasn't visible, reset flags
+  if (!isActuallyVisible) {
+    panelSize.visible = false
+    panelState = "hidden"
+  }
+
+  // If monitor worker thread is dead or inactive, kick off background recovery so flyout can refresh
+  if (!monitorsThreadReady || !monitorsThreadReal || monitorsThreadReal.exitCode !== null) {
+    console.warn("Tray clicked but monitor thread is inactive/dead. Recovering worker in background...")
+    recoverMonitorThread(monitorsThreadReal, new Error("Tray clicked with inactive monitor thread"))
+  }
+
+  if (doRefresh && !isOverlay) {
     console.log("Panel brightness cache", {
       linkedLevel: settings.linkedLevel,
       monitors: getBrightnessSnapshotForLog()
@@ -5138,6 +5189,7 @@ const toggleTray = async (doRefresh = true, isOverlay = false) => {
       showPanel(true, panelSize.height)
       panelState = "visible"
       mainWindow.focus()
+      trySetForegroundWindow(mainWindowHandle)
     } else {
       sendToAllWindows("display-mode", "overlay")
       panelState = "overlay"
@@ -5731,9 +5783,20 @@ function clearRecentlyWokeUpLater() {
   }, 15000)
 }
 
-// Handle resume from sleep/hibernation
-powerMonitor.on("resume", async () => {
-  console.log("Resuming......")
+// Handle resume from sleep/hibernation / Modern Standby
+async function handleSystemResume(source = "powerMonitor:resume") {
+  console.log(`handleSystemResume triggered from: ${source}`)
+  if(resumeRecoveryInProgress) {
+    if (Date.now() - resumeRecoveryStartTime > 20000) {
+      console.warn(`handleSystemResume: previous recovery stuck for >20s, resetting for ${source}.`)
+      resumeRecoveryInProgress = false
+    } else {
+      console.log(`handleSystemResume: recovery already in progress (started ${Date.now() - resumeRecoveryStartTime}ms ago), skipping ${source}.`)
+      return
+    }
+  }
+
+  console.log("Resuming......", source)
   recentlyWokeUp = true
   resumeRecoveryInProgress = true
   resumeRecoveryHandled = false
@@ -5750,12 +5813,12 @@ powerMonitor.on("resume", async () => {
     clearTimeout(handleChangeTimeout2)
     handleChangeTimeout2 = false
   }
-  const block = blockBadDisplays("powerMonitor:resume")
+  const block = blockBadDisplays(`handleSystemResume:${source}`)
   setRecentlyInteracted(false)
   
   if(settings.restartOnWake) {
-  // Screw it, just restart the whole app.
-    tray.destroy()
+    // Screw it, just restart the whole app.
+    try { tray?.destroy?.() } catch(e) {}
     app.relaunch()
     app.exit()
     return
@@ -5826,6 +5889,10 @@ powerMonitor.on("resume", async () => {
     resumeRecoveryInProgress = false
     clearRecentlyWokeUpLater()
   }
+}
+
+powerMonitor.on("resume", () => {
+  handleSystemResume("powerMonitor:resume")
 })
 
 function handleMetricsChange(type) {
