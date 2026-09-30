@@ -165,10 +165,18 @@ class LightSensor {
         this.wakeGraceUntil = Date.now() + 5000;
         try {
             console.log(`Light Sensor: reconnecting ${this.active.name} after resume`);
-            await this.active.reconnect();
-            if (options.immediate) return await this.getImmediateTargets();
+            const reconnectPromise = Promise.resolve().then(() => this.active.reconnect());
+            const timeoutPromise = new Promise((_, reject) =>
+                setTimeout(() => reject(new Error("Sensor reconnect timed out after 2500ms")), 2500)
+            );
+            await Promise.race([reconnectPromise, timeoutPromise]);
+            if (options.immediate) {
+                const targetsPromise = Promise.resolve().then(() => this.getImmediateTargets());
+                const targetTimeout = new Promise(resolve => setTimeout(() => resolve(null), 1500));
+                return await Promise.race([targetsPromise, targetTimeout]);
+            }
         } catch (error) {
-            console.error(`Error reconnecting ${this.active.name} sensor after resume:`, error);
+            console.error(`Error reconnecting ${this.active.name} sensor after resume:`, error?.message || error);
         }
         return null;
     }

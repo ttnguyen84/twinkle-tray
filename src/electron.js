@@ -498,53 +498,51 @@ function stopMonitorThread() {
     if(monitorsThreadReal === thread) monitorsThreadReal = undefined
     return Promise.resolve()
   }
-  // Only reuse a pending stop if it targets this same thread. A newer
-  // thread can be forked while an older one is still exiting, and the
-  // newer one still needs its own kill.
   if(monitorsThreadStopPromise && monitorsThreadStopTarget === thread) return monitorsThreadStopPromise;
 
-  const stopPromise = new Promise((resolve, reject) => {
-    let timeoutId = null
-    const cleanup = () => {
-      if (timeoutId) clearTimeout(timeoutId)
+  const stopPromise = new Promise(resolve => {
+    let done = false
+    let timer = null
+
+    const finish = (reason = "normal") => {
+      if (done) return
+      done = true
+      if (timer) {
+        clearTimeout(timer)
+        timer = null
+      }
       thread.removeListener("exit", handleExit)
-      thread.removeListener("close", handleExit)
-    }
-    const handleExit = () => {
-      cleanup()
+      thread.removeListener("close", handleClose)
+      thread.removeListener("error", handleError)
       if(monitorsThreadReal === thread) monitorsThreadReal = undefined
+      console.log(`stopMonitorThread resolved (${reason})`)
       resolve()
     }
 
-    thread.once("exit", handleExit)
-    thread.once("close", handleExit)
+    const handleExit = () => finish("exit")
+    const handleClose = () => finish("close")
+    const handleError = () => finish("error")
 
-    // Force termination and cleanup if thread fails to exit within 3.5s
-    timeoutId = setTimeout(() => {
-      console.warn("stopMonitorThread: Worker process did not exit in time. Forcing cleanup.")
-      cleanup()
+    thread.once("exit", handleExit)
+    thread.once("close", handleClose)
+    thread.once("error", handleError)
+
+    // Hard fallback timeout: 1500ms max. Do NOT unref this timer.
+    timer = setTimeout(() => {
+      console.warn("stopMonitorThread: Worker process did not exit within 1500ms. Forcing cleanup.")
       try {
         if (thread.pid) {
           process.kill(thread.pid, "SIGKILL")
         }
       } catch (e) {}
-      if(monitorsThreadReal === thread) monitorsThreadReal = undefined
-      resolve()
-    }, 3500)
-    if (timeoutId.unref) timeoutId.unref()
+      finish("timeout")
+    }, 1500)
 
     try {
-      if(!thread.kill()) {
-        if(thread.exitCode !== null) {
-          handleExit()
-        } else {
-          cleanup()
-          reject(new Error("Monitor thread could not be terminated."))
-        }
-      }
+      thread.kill()
     } catch(error) {
-      cleanup()
-      reject(error)
+      console.warn("Error calling thread.kill():", error)
+      finish("kill-error")
     }
   }).finally(() => {
     if(monitorsThreadStopPromise === stopPromise) {
@@ -4187,7 +4185,7 @@ function createPanel(toggleOnLoad = false, isRefreshing = false, showOnLoad = tr
       // 0 = closed, 1 = open. On some hardware opening lid emits 0 then 1, or just 0.
       console.log(`Lid switch event: data=${setting.data}, recentlyWokeUp=${recentlyWokeUp}, resumeRecoveryHandled=${resumeRecoveryHandled}`)
       if ((recentlyWokeUp && !resumeRecoveryHandled) || !monitorsThreadReady) {
-        handleSystemResume(`GUID_LIDSWITCH_STATE_CHANGE(${setting.data})`)
+        scheduleSystemResume(`GUID_LIDSWITCH_STATE_CHANGE(${setting.data})`, 2000)
       }
     } else if (setting.name === "GUID_CONSOLE_DISPLAY_STATE" || setting.name === "GUID_SESSION_DISPLAY_STATUS") {
       // 0 = off, 1 = on, 2 = dimmed
@@ -4195,7 +4193,7 @@ function createPanel(toggleOnLoad = false, isRefreshing = false, showOnLoad = tr
         console.log(`Display wake event: ${setting.name} (${setting.data})`)
         isWindowsUserIdle = false
         if ((recentlyWokeUp && !resumeRecoveryHandled) || !monitorsThreadReady) {
-          handleSystemResume(`${setting.name}(${setting.data})`)
+          scheduleSystemResume(`${setting.name}(${setting.data})`, 2000)
         }
       }
     } else if (setting.name === "GUID_MONITOR_POWER_ON") {
@@ -4204,7 +4202,7 @@ function createPanel(toggleOnLoad = false, isRefreshing = false, showOnLoad = tr
         console.log("Monitor power on event")
         isWindowsUserIdle = false
         if ((recentlyWokeUp && !resumeRecoveryHandled) || !monitorsThreadReady) {
-          handleSystemResume("GUID_MONITOR_POWER_ON")
+          scheduleSystemResume("GUID_MONITOR_POWER_ON", 2000)
         }
       }
     } else if(setting.name === "GUID_SESSION_USER_PRESENCE") {
@@ -4226,7 +4224,7 @@ function createPanel(toggleOnLoad = false, isRefreshing = false, showOnLoad = tr
           isWindowsUserIdle = false
           console.log("Displays have woken up via GUID_SESSION_USER_PRESENCE.")
           if (recentlyWokeUp && !resumeRecoveryHandled && !resumeRecoveryInProgress) {
-            handleSystemResume("GUID_SESSION_USER_PRESENCE")
+            scheduleSystemResume("GUID_SESSION_USER_PRESENCE", 1500)
           } else {
             recentlyWokeUp = true
             lightSensor.wakeGraceUntil = Date.now() + 5000
@@ -4933,6 +4931,14 @@ function createTray() {
       await toggleTray(true)
     } catch (e) {
       console.error("[TRAY] Error handling tray click:", e)
+    }
+  })
+  tray.on("double-click", async () => {
+    try {
+      console.log("[TRAY] Double-click event received")
+      await toggleTray(true)
+    } catch (e) {
+      console.error("[TRAY] Error handling tray double-click:", e)
     }
   })
 
@@ -5774,6 +5780,8 @@ let recentlyWokeUpTimeout = false
 let resumeRecoveryInProgress = false
 let resumeRecoveryHandled = false
 let resumeRecoveryStartTime = 0
+let resumeDebounceTimer = null
+
 function clearRecentlyWokeUpLater() {
   if(recentlyWokeUpTimeout) clearTimeout(recentlyWokeUpTimeout);
   recentlyWokeUpTimeout = setTimeout(() => {
@@ -5781,6 +5789,23 @@ function clearRecentlyWokeUpLater() {
     resumeRecoveryHandled = false
     recentlyWokeUpTimeout = false
   }, 15000)
+}
+
+function scheduleSystemResume(source = "powerMonitor:resume", delay = 2000) {
+  console.log(`scheduleSystemResume called from: ${source}, delay: ${delay}ms`)
+  recentlyWokeUp = true
+  if (recentlyWokeUpTimeout) {
+    clearTimeout(recentlyWokeUpTimeout)
+    recentlyWokeUpTimeout = false
+  }
+  if (resumeDebounceTimer) {
+    clearTimeout(resumeDebounceTimer)
+    resumeDebounceTimer = null
+  }
+  resumeDebounceTimer = setTimeout(() => {
+    resumeDebounceTimer = null
+    handleSystemResume(source)
+  }, delay)
 }
 
 // Handle resume from sleep/hibernation / Modern Standby
@@ -5827,13 +5852,19 @@ async function handleSystemResume(source = "powerMonitor:resume") {
   const sensorRecovery = lightSensor.resume({ immediate: true })
 
   try {
-    await stopMonitorThread()
-    // If a concurrent recovery path (e.g. the thread's own error handler)
-    // already started a replacement, adopt it instead of treating the start
-    // as a failure.
-    const thread = startMonitorThread({ allowWhileWindowsIdle: true }) || monitorsThreadReal
-    if(!thread) throw new Error("Monitor thread could not be restarted after resume.");
-    await waitForMonitorThreadReady(thread)
+    let thread = monitorsThreadReal
+    if (!thread || !monitorsThreadReady || thread.exitCode !== null) {
+      console.log("Monitor thread is inactive or not ready, restarting worker process...")
+      await stopMonitorThread()
+      // If a concurrent recovery path (e.g. the thread's own error handler)
+      // already started a replacement, adopt it instead of treating the start
+      // as a failure.
+      thread = startMonitorThread({ allowWhileWindowsIdle: true }) || monitorsThreadReal
+      if(!thread) throw new Error("Monitor thread could not be restarted after resume.");
+      await waitForMonitorThreadReady(thread)
+    } else {
+      console.log("Monitor thread is healthy and ready, reusing worker.")
+    }
 
     // Give Windows a few seconds to... you know... wake up.
     await Utils.wait(parseInt(settings.wakeRestoreSeconds ?? 8) * 1000)
@@ -5892,7 +5923,7 @@ async function handleSystemResume(source = "powerMonitor:resume") {
 }
 
 powerMonitor.on("resume", () => {
-  handleSystemResume("powerMonitor:resume")
+  scheduleSystemResume("powerMonitor:resume", 1500)
 })
 
 function handleMetricsChange(type) {
@@ -6481,8 +6512,11 @@ function handleCommandLine(event, argv, directory, additionalData) {
 
   try {
     // Extract flags
-    additionalData.forEach((flag) => {
-      if (flag.indexOf('--') == 0) {
+    const rawArgs = []
+    if (Array.isArray(additionalData)) rawArgs.push(...additionalData);
+    if (Array.isArray(argv)) rawArgs.push(...argv);
+    rawArgs.forEach((flag) => {
+      if (typeof flag === "string" && flag.indexOf('--') === 0) {
         commandLine.push(flag.toLowerCase())
       }
     })
@@ -6551,7 +6585,7 @@ function handleCommandLine(event, argv, directory, additionalData) {
         }
 
         // Show panel
-        if (arg.indexOf("--panel") === 0 && panelState !== "visible") {
+        if (arg.indexOf("--panel") === 0) {
           toggleTray(true)
         }
 
@@ -6727,6 +6761,9 @@ const handleClientMessage = async (message, remote) => {
       // data.type === "list"
       // List all current monitors
       return JSON.stringify(monitors)
+    } else if (data.type === "panel") {
+      toggleTray(true)
+      return "OK"
     } else if (data.type === "get") {
       // data.type === "get"
       // Get property of specific monitor

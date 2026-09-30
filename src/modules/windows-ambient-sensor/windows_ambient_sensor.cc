@@ -45,7 +45,12 @@ struct CachedSensor {
 
     ~CachedSensor() {
         if (sensor) {
-            sensor->SetEventSink(nullptr);
+            SensorState state;
+            // Only detach event sink if sensor is currently responsive and ready;
+            // otherwise, avoid blocking RPC calls during sleep/wake power transitions.
+            if (SUCCEEDED(sensor->GetState(&state)) && state == SENSOR_STATE_READY) {
+                sensor->SetEventSink(nullptr);
+            }
         }
     }
 };
