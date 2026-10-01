@@ -20,7 +20,8 @@ module.exports = {
         setForegroundWindow: WindowUtils.setForegroundWindow,
         getForegroundWindow: WindowUtils.getForegroundWindow,
         getWindowLong: WindowUtils.getWindowLong,
-        getWindowFullscreen: WindowUtils.getWindowFullscreen
+        getWindowFullscreen: WindowUtils.getWindowFullscreen,
+        registerWindowMessage: WindowUtils.registerWindowMessage
     },
     PowerEvents: {
         registerPowerSettingNotifications: PowerEvents.registerPowerSettingNotifications,

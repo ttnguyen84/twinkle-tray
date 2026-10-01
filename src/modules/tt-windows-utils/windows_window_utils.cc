@@ -150,6 +150,16 @@ Napi::Number GetWinLong(const Napi::CallbackInfo& info)
     return Napi::Number::New(info.Env(), static_cast<double>(result));
 }
 
+Napi::Number RegisterWindowMsg(const Napi::CallbackInfo& info)
+{
+    if (info.Length() < 1 || !info[0].IsString()) {
+        return Napi::Number::New(info.Env(), 0);
+    }
+    std::string msgName = info[0].As<Napi::String>().Utf8Value();
+    UINT msg = RegisterWindowMessageA(msgName.c_str());
+    return Napi::Number::New(info.Env(), msg);
+}
+
 Napi::Object Init(Napi::Env env, Napi::Object exports)
 {
     exports.Set("setWindowPos", Napi::Function::New(env, SetWindowPosition));
@@ -159,6 +169,7 @@ Napi::Object Init(Napi::Env env, Napi::Object exports)
     exports.Set("setForegroundWindow", Napi::Function::New(env, SetForegroundWin));
     exports.Set("getWindowLong", Napi::Function::New(env, GetWinLong));
     exports.Set("getWindowFullscreen", Napi::Function::New(env, GetWindowFullscreen));
+    exports.Set("registerWindowMessage", Napi::Function::New(env, RegisterWindowMsg));
     return exports;
 }
 

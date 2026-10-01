@@ -4169,6 +4169,19 @@ function createPanel(toggleOnLoad = false, isRefreshing = false, showOnLoad = tr
     }
   })
 
+  // TaskbarCreated message (when Explorer starts/restarts or taskbar is recreated)
+  try {
+    const taskbarCreatedMsg = WindowUtils.registerWindowMessage("TaskbarCreated");
+    if (taskbarCreatedMsg > 0) {
+      mainWindow.hookWindowMessage(taskbarCreatedMsg, () => {
+        console.log("[TRAY] TaskbarCreated message received from Windows Explorer, recreating tray...");
+        recreateTray();
+      });
+    }
+  } catch (e) {
+    console.error("Failed to register TaskbarCreated window message:", e);
+  }
+
   // WM_POWERBROADCAST
   mainWindow.hookWindowMessage(0x218, (wParam, lParam) => {
     if(settings.disablePowerNotifications) return false;
@@ -5748,7 +5761,7 @@ function handleMonitorChange(t, e, d) {
   }
   const delay = Math.max(500, parseInt(settings.hardwareRestoreSeconds ?? 5) * 1000)
   handleChangeTimeout2 = setTimeout(async () => {
-    if(settings.recreateTray) recreateTray();
+    if(settings.recreateTray || !tray || (typeof tray?.isDestroyed === 'function' && tray.isDestroyed())) recreateTray();
 
     // Reset all known displays
     await refreshMonitors(true, false, false, hasEnabledLinkedFeatures())
@@ -5897,7 +5910,7 @@ async function handleSystemResume(source = "powerMonitor:resume") {
     )
 
     if (!settings.disableAutoRefresh) {
-      if(settings.recreateTray) recreateTray();
+      if(settings.recreateTray || !tray || (typeof tray?.isDestroyed === 'function' && tray.isDestroyed())) recreateTray();
       if(settings.recreateFlyout && !panelSize.visible) restartPanel();
 
       // Check if time adjustments should apply

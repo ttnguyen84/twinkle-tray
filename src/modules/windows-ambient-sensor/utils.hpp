@@ -110,23 +110,6 @@ struct SensorInfo {
         if (SUCCEEDED(sensor->GetState(&s))) {
             state = GetSensorStateString(s);
         }
-
-        // Current Lux
-        ComPtr<ISensorDataReport> report;
-        if (SUCCEEDED(sensor->GetData(&report)) && report) {
-            PROPVARIANT var;
-            PropVariantInit(&var);
-
-            if (SUCCEEDED(report->GetSensorValue(SENSOR_DATA_TYPE_LIGHT_LEVEL_LUX, &var))) {
-                if (var.vt == VT_R4) {
-                    currentLux = var.fltVal;
-                } else if (var.vt == VT_R8) {
-                    currentLux = var.dblVal;
-                }
-            }
-
-            PropVariantClear(&var);
-        }
     }
 };
 
