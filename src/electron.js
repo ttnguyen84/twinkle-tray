@@ -739,10 +739,12 @@ function enableMouseEvents() {
 
     // Handle edge cases where "blur" event doesn't properly fire
     mouseEvents.on("mousedown", (e) => {
-      if (panelSize.visible || !canReposition) {
+      if ((panelSize.visible && panelState === "visible") || !canReposition) {
 
         // Check if clicking outside of panel/overlay
-        const pBounds = screen.dipToScreenRect(mainWindow, mainWindow.getBounds())
+        const validBounds = (panelSize.bounds && panelSize.bounds.x > -10000) ? panelSize.bounds : mainWindow.getBounds()
+        if (validBounds.x < -10000) return false;
+        const pBounds = screen.dipToScreenRect(mainWindow, validBounds)
         if (e.x < pBounds.x || e.x > pBounds.x + pBounds.width || e.y < pBounds.y || e.y > pBounds.y + pBounds.height) {
           if (!canReposition) {
             // Overlay is displayed
@@ -1350,7 +1352,7 @@ function processSettings(newSettings = {}, sendUpdate = true) {
 
     if (newSettings.icon !== undefined) {
       if (tray) {
-        tray.setImage(getTrayIconPath())
+        updateTrayIcon(true)
       }
     }
 
@@ -2330,7 +2332,7 @@ async function getThemeRegistry() {
   sendToAllWindows('theme-settings', themeSettings)
   lastTheme = themeSettings
   if (tray) {
-    tray.setImage(getTrayIconPath())
+    updateTrayIcon()
   }
 
   // Taskbar position
@@ -4174,8 +4176,8 @@ function createPanel(toggleOnLoad = false, isRefreshing = false, showOnLoad = tr
     const taskbarCreatedMsg = WindowUtils.registerWindowMessage("TaskbarCreated");
     if (taskbarCreatedMsg > 0) {
       mainWindow.hookWindowMessage(taskbarCreatedMsg, () => {
-        console.log("[TRAY] TaskbarCreated message received from Windows Explorer, recreating tray...");
-        recreateTray();
+        console.log("[TRAY] TaskbarCreated message received from Windows Explorer, scheduling tray recreation...");
+        setTimeout(() => recreateTray(300), 800);
       });
     }
   } catch (e) {
@@ -4486,13 +4488,18 @@ function repositionPanel() {
       targetX = Math.max(minX, Math.min(maxX, targetX))
       targetY = Math.max(minY, Math.min(maxY, targetY))
 
-      mainWindow.setBounds({
+      const targetBounds = {
         width: panelSize.width,
         height: panelSize.height,
         x: Math.round(targetX),
         y: Math.round(targetY)
-      })
-      panelSize.base = mainWindow.getBounds().y
+      }
+      panelSize.bounds = targetBounds
+      panelSize.base = targetBounds.y
+
+      if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isMinimized()) {
+        mainWindow.setBounds(targetBounds)
+      }
     }
 
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -4665,10 +4672,16 @@ function showPanel(show = true, height = 300) {
       panelHeight = height
       panelSize.visible = true
 
-      panelSize.bounds = mainWindow.getBounds()
       const currentDisplay = getPrimaryDisplay()
       primaryDPI = currentDisplay?.scaleFactor || screen.getPrimaryDisplay()?.scaleFactor || 1
       panelHeight = panelHeight * primaryDPI
+
+      const targetBounds = panelSize.bounds || {
+        width: panelSize.width,
+        height: panelSize.height,
+        x: 0,
+        y: 0
+      }
 
       if (settings.useNativeAnimation && settings.useAcrylic && lastTheme?.EnableTransparency) {
         // Acrylic + Native Animation
@@ -4684,11 +4697,11 @@ function showPanel(show = true, height = 300) {
         mainWindow.setBackgroundColor("#00000000")
         if (panelSize.taskbar?.position === "TOP") {
           // Top
-          setWindowPos(mainWindowHandle, -2, panelSize.bounds.x * primaryDPI, ((panelSize.base) * primaryDPI), panelSize.bounds.width * primaryDPI, panelHeight, 0x0400)
+          setWindowPos(mainWindowHandle, -2, targetBounds.x * primaryDPI, ((panelSize.base) * primaryDPI), targetBounds.width * primaryDPI, panelHeight, 0x0400)
         } else {
           // Bottom, left, right
+          mainWindow.setBounds(targetBounds)
           mainWindow.show()
-          mainWindow.setBounds(panelSize.bounds)
         }
       }
 
@@ -4699,7 +4712,7 @@ function showPanel(show = true, height = 300) {
       pauseMouseEvents(false)
       mainWindow.setOpacity(1)
       mainWindow.show()
-      sendToAllWindows('panel-position', mainWindow.getPosition())
+      sendToAllWindows('panel-position', [targetBounds.x, targetBounds.y])
       sendToAllWindows("playPanelAnimation")
 
     } else {
@@ -4931,59 +4944,127 @@ app.on('quit', () => {
 //
 //
 
+let lastTrayIconPath = ""
 function createTray() {
-  if (tray != null) return false;
+  if (tray != null && typeof tray.isDestroyed === 'function' && !tray.isDestroyed()) {
+    return false;
+  }
 
-  const { Tray } = require('electron')
-  tray = new Tray(getTrayIconPath())
-  tray.setToolTip('Twinkle Tray' + (isDev ? " (Dev)" : ""))
-  setTrayMenu()
-  tray.on("click", async () => {
-    try {
-      console.log("[TRAY] Click event received")
-      await toggleTray(true)
-    } catch (e) {
-      console.error("[TRAY] Error handling tray click:", e)
-    }
-  })
-  tray.on("double-click", async () => {
-    try {
-      console.log("[TRAY] Double-click event received")
-      await toggleTray(true)
-    } catch (e) {
-      console.error("[TRAY] Error handling tray double-click:", e)
-    }
-  })
-
-  let lastMouseMove = Date.now()
-  tray.on('mouse-move', async () => {
-    const now = Date.now()
-    if (lastMouseMove + 500 > now) return false;
-    lastMouseMove = now
-    bounds = tray.getBounds()
-    bounds = screen.dipToScreenRect(null, bounds)
-    tryPanelBrightnessUpdate()
-    sendToAllWindows('panel-unsleep')
-
-    if (settings.scrollShortcut) {
-      // Start tracking cursor to determine when it leaves the tray
-      if (mouseEvents && mouseEvents.getPaused()) {
-        pauseMouseEvents(false)
+  try {
+    const { Tray } = require('electron')
+    const iconPath = getTrayIconPath()
+    console.log(`[TRAY] Creating tray icon from: ${iconPath}`)
+    tray = new Tray(iconPath)
+    lastTrayIconPath = iconPath
+    tray.setToolTip('Twinkle Tray' + (isDev ? " (Dev)" : ""))
+    setTrayMenu()
+    tray.on("click", async () => {
+      try {
+        console.log("[TRAY] Click event received")
+        await toggleTray(true)
+      } catch (e) {
+        console.error("[TRAY] Error handling tray click:", e)
       }
-      willPauseMouseEvents()
-    }
-  })
+    })
+    tray.on("double-click", async () => {
+      try {
+        console.log("[TRAY] Double-click event received")
+        await toggleTray(true)
+      } catch (e) {
+        console.error("[TRAY] Error handling tray double-click:", e)
+      }
+    })
 
+    let lastMouseMove = Date.now()
+    tray.on('mouse-move', async () => {
+      const now = Date.now()
+      if (lastMouseMove + 500 > now) return false;
+      lastMouseMove = now
+      bounds = tray.getBounds()
+      bounds = screen.dipToScreenRect(null, bounds)
+      tryPanelBrightnessUpdate()
+      sendToAllWindows('panel-unsleep')
+
+      if (settings.scrollShortcut) {
+        // Start tracking cursor to determine when it leaves the tray
+        if (mouseEvents && mouseEvents.getPaused()) {
+          pauseMouseEvents(false)
+        }
+        willPauseMouseEvents()
+      }
+    })
+
+    console.log("[TRAY] Tray icon created successfully")
+    return true
+  } catch (e) {
+    console.error("[TRAY] Failed to create tray icon:", e)
+    tray = null
+    return false
+  }
+}
+
+function updateTrayIcon(force = false) {
+  if (!tray || (typeof tray.isDestroyed === 'function' && tray.isDestroyed())) {
+    recreateTray(100)
+    return
+  }
+  const newIconPath = getTrayIconPath()
+  if (force || newIconPath !== lastTrayIconPath) {
+    try {
+      tray.setImage(newIconPath)
+      lastTrayIconPath = newIconPath
+    } catch (e) {
+      console.warn("[TRAY] Error updating tray icon image:", e)
+    }
+  }
+}
+
+function promoteTrayInWindows11() {
+  if (process.platform !== "win32") return;
+  try {
+    const { exec } = require('child_process');
+    exec(`powershell -NoProfile -Command "Get-ChildItem 'HKCU:\\Control Panel\\NotifyIconSettings' -ErrorAction SilentlyContinue | ForEach-Object { $p = $_.PSPath; $props = Get-ItemProperty $p; if ($props.ExecutablePath -like '*Twinkle*') { Set-ItemProperty -Path $p -Name 'IsPromoted' -Value 1 -Type DWord -ErrorAction SilentlyContinue } }"`, { windowsHide: true }, () => {});
+  } catch (e) {}
 }
 
 let recreatingTray = false
-async function recreateTray() {
-  if(recreatingTray) return;
-  recreatingTray = true
-  tray?.destroy?.()
-  tray = null
-  createTray()
-  recreatingTray = false
+let recreateTrayTimer = null
+async function recreateTray(delayMs = 250) {
+  if (recreateTrayTimer) {
+    clearTimeout(recreateTrayTimer);
+    recreateTrayTimer = null;
+  }
+
+  if (recreatingTray) {
+    console.log("[TRAY] recreateTray already in progress, scheduling after current run...")
+    recreateTrayTimer = setTimeout(() => recreateTray(delayMs), delayMs + 100);
+    return;
+  }
+
+  recreatingTray = true;
+  console.log(`[TRAY] recreateTray requested (delay: ${delayMs}ms)...`);
+
+  try {
+    if (tray && typeof tray.destroy === "function") {
+      try {
+        tray.destroy();
+      } catch (e) {
+        console.warn("[TRAY] Error destroying old tray:", e);
+      }
+    }
+    tray = null;
+
+    if (delayMs > 0) {
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+
+    createTray();
+    promoteTrayInWindows11();
+  } catch (e) {
+    console.error("[TRAY] Error during recreateTray:", e);
+  } finally {
+    recreatingTray = false;
+  }
 }
 
 function setTrayMenu() {
@@ -5141,7 +5222,7 @@ function quitApp() {
 }
 
 const toggleTray = async (doRefresh = true, isOverlay = false) => {
-  const isActuallyVisible = Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && (panelSize.visible || panelState === "visible"))
+  const isActuallyVisible = Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && !mainWindow.isMinimized() && (panelSize.visible || panelState === "visible"))
   console.log("toggleTray called", {
     doRefresh,
     isOverlay,
@@ -5150,6 +5231,12 @@ const toggleTray = async (doRefresh = true, isOverlay = false) => {
     panelSizeVisible: panelSize.visible,
     panelState
   })
+
+  // If tray is missing or destroyed, recover it in background
+  if (!tray || (typeof tray.isDestroyed === 'function' && tray.isDestroyed())) {
+    console.warn("[TRAY] Tray icon missing or destroyed during toggleTray, recreating...")
+    recreateTray(100)
+  }
 
   if (mainWindow == null || mainWindow.isDestroyed() || !mainWindow.webContents || (mainWindow.webContents.isCrashed && mainWindow.webContents.isCrashed())) {
     console.warn("mainWindow is null, destroyed, or crashed. Recreating panel...")
@@ -5651,10 +5738,12 @@ function addEventListeners() {
   screen.addListener("display-added", () => {
     if(settings.useElectronEvents) handleMonitorChange("display-added");
     repositionPanel();
+    recreateTray(300);
   })
   screen.addListener("display-removed", () => {
     if(settings.useElectronEvents) handleMonitorChange("display-removed");
     repositionPanel();
+    recreateTray(300);
   })
   screen.addListener("display-metrics-changed", () => {
     if(settings.useElectronEvents) handleMetricsChange("display-metrics-changed");
@@ -5718,11 +5807,7 @@ function handleAccentChange() {
     sendToAllWindows('update-colors', getAccentColors())
     await getThemeRegistry()
     setTimeout(sendMicaWallpaper, 100)
-    try {
-      tray.setImage(getTrayIconPath())
-    } catch (e) {
-      debug.log("Couldn't update tray icon!", e)
-    }
+    updateTrayIcon()
     handleAccentChangeTimeout = false
   }, 2000)
 }
@@ -5761,7 +5846,7 @@ function handleMonitorChange(t, e, d) {
   }
   const delay = Math.max(500, parseInt(settings.hardwareRestoreSeconds ?? 5) * 1000)
   handleChangeTimeout2 = setTimeout(async () => {
-    if(settings.recreateTray || !tray || (typeof tray?.isDestroyed === 'function' && tray.isDestroyed())) recreateTray();
+    recreateTray(300);
 
     // Reset all known displays
     await refreshMonitors(true, false, false, hasEnabledLinkedFeatures())
@@ -5910,7 +5995,7 @@ async function handleSystemResume(source = "powerMonitor:resume") {
     )
 
     if (!settings.disableAutoRefresh) {
-      if(settings.recreateTray || !tray || (typeof tray?.isDestroyed === 'function' && tray.isDestroyed())) recreateTray();
+      recreateTray(300);
       if(settings.recreateFlyout && !panelSize.visible) restartPanel();
 
       // Check if time adjustments should apply
