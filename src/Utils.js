@@ -125,6 +125,11 @@ module.exports = {
                 validArgs.ShowPanel = true
             }
 
+            // Recreate tray
+            if (arg.indexOf("--recreate-tray") === 0) {
+                validArgs.RecreateTray = true
+            }
+
         })
 
         return validArgs
@@ -133,14 +138,32 @@ module.exports = {
     async handleProcessedArgs(args = {}, knownDisplaysPath, settingsPath) {
 
         let failed
-        const settings = JSON.parse(fs.readFileSync(settingsPath))
+        let settings = {}
+        try {
+            settings = JSON.parse(fs.readFileSync(settingsPath))
+        } catch (e) {}
 
-        if (args.ShowPanel) {
+        const useUDP = (args.UseUDP ? true : false)
+
+        if (args.ShowPanel || Object.keys(args).length === 0) {
             console.log(`Showing panel`)
+            try {
+                await (useUDP ? udpSendCommand : pipeSendCommand)("panel", false, settings.udpPortActive, settings.udpKey)
+            } catch (e) {
+                console.log("Could not communicate with running Twinkle Tray instance:", e)
+            }
+            failed = false;
+            return true;
+        } else if (args.RecreateTray) {
+            console.log(`Recreating tray`)
+            try {
+                await (useUDP ? udpSendCommand : pipeSendCommand)("recreate-tray", false, settings.udpPortActive, settings.udpKey)
+            } catch (e) {}
+            failed = false;
+            return true;
         } else if (args.List) {
             //const displays = getKnownDisplays(knownDisplaysPath)
 
-            const useUDP = (args.UseUDP ? true : false)
             const response = await (useUDP ? udpSendCommand : pipeSendCommand)("list", false, settings.udpPortActive, settings.udpKey)
             let displays = {}
             try {

@@ -4207,6 +4207,7 @@ function createPanel(toggleOnLoad = false, isRefreshing = false, showOnLoad = tr
       if (setting.data === 1 || setting.data === 2) {
         console.log(`Display wake event: ${setting.name} (${setting.data})`)
         isWindowsUserIdle = false
+        recreateTray(500)
         if ((recentlyWokeUp && !resumeRecoveryHandled) || !monitorsThreadReady) {
           scheduleSystemResume(`${setting.name}(${setting.data})`, 2000)
         }
@@ -4216,6 +4217,7 @@ function createPanel(toggleOnLoad = false, isRefreshing = false, showOnLoad = tr
       if (setting.data === 1) {
         console.log("Monitor power on event")
         isWindowsUserIdle = false
+        recreateTray(500)
         if ((recentlyWokeUp && !resumeRecoveryHandled) || !monitorsThreadReady) {
           scheduleSystemResume("GUID_MONITOR_POWER_ON", 2000)
         }
@@ -6094,6 +6096,7 @@ powerMonitor.on("lock-screen", () => {
 })
 powerMonitor.on("unlock-screen", () => {
   console.log("Event: unlock-screen");
+  recreateTray(300);
   if (recentlyWokeUp) {
     if(resumeRecoveryInProgress) {
       console.log("Resume recovery is already handling unlock-screen.")
@@ -6684,7 +6687,13 @@ function handleCommandLine(event, argv, directory, additionalData) {
 
         // Show panel
         if (arg.indexOf("--panel") === 0) {
+          recreateTray(100)
           toggleTray(true)
+        }
+
+        // Recreate tray
+        if (arg.indexOf("--recreate-tray") === 0) {
+          recreateTray(100)
         }
 
       })
@@ -6727,6 +6736,11 @@ function handleCommandLine(event, argv, directory, additionalData) {
         applyCurrentAdjustmentEvent(true, false)
       }
 
+    } else {
+      // Launched second instance without arguments (e.g. clicked shortcut)
+      console.log("[CLI] Second instance opened with no arguments: restoring tray and panel");
+      recreateTray(100);
+      toggleTray(true);
     }
 
   } catch (e) {
@@ -6860,7 +6874,11 @@ const handleClientMessage = async (message, remote) => {
       // List all current monitors
       return JSON.stringify(monitors)
     } else if (data.type === "panel") {
+      recreateTray(100)
       toggleTray(true)
+      return "OK"
+    } else if (data.type === "recreate-tray") {
+      recreateTray(100)
       return "OK"
     } else if (data.type === "get") {
       // data.type === "get"
