@@ -3,7 +3,7 @@ const { Worker } = require("worker_threads");
 
 const MAX_READ_ERRORS = 3;
 const REDISCOVER_DELAY = 60000;
-const CALL_TIMEOUT = 2500;
+const CALL_TIMEOUT = 8000;
 
 class WindowsAmbientLightSensor {
   constructor() {
@@ -66,10 +66,16 @@ class WindowsAmbientLightSensor {
 
   _terminateWorker() {
     if (this.worker) {
-      try {
-        this.worker.terminate();
-      } catch (e) {}
+      const workerToTerminate = this.worker;
       this.worker = null;
+      try {
+        workerToTerminate.postMessage({ type: "stop" });
+      } catch (e) {}
+      setTimeout(() => {
+        try {
+          workerToTerminate.terminate?.().catch?.(() => {});
+        } catch (e) {}
+      }, 500);
     }
     this._cleanupPending(new Error("Worker terminated"));
   }
@@ -90,8 +96,7 @@ class WindowsAmbientLightSensor {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingCalls.delete(id);
-        console.warn(`Windows Ambient Sensor call '${type}' timed out after ${timeoutMs}ms, terminating worker.`);
-        this._terminateWorker();
+        console.warn(`Windows Ambient Sensor call '${type}' timed out after ${timeoutMs}ms.`);
         reject(new Error(`Call '${type}' timed out`));
       }, timeoutMs);
 
@@ -112,7 +117,9 @@ class WindowsAmbientLightSensor {
   }
 
   async reconnect() {
-    await this.disconnect();
+    this._stopPolling();
+    if (this.rediscoverTimer) clearTimeout(this.rediscoverTimer);
+    this.rediscoverTimer = null;
     await this.connect();
   }
 
@@ -133,7 +140,7 @@ class WindowsAmbientLightSensor {
   async _discoverSensors() {
     const startedAt = Date.now();
     try {
-      const sensors = await this._callWorker("discover", {}, 2500);
+      const sensors = await this._callWorker("discover", {}, CALL_TIMEOUT);
       this.sensorsAvailable = Array.isArray(sensors) ? sensors : [];
       this.selectedSensorId = this.sensorsAvailable[0]?.id ?? null;
       this.readErrors = 0;
@@ -180,7 +187,7 @@ class WindowsAmbientLightSensor {
   }
 
   async _readLux() {
-    return await this._callWorker("readLux", { sensorId: this.selectedSensorId }, 1500);
+    return await this._callWorker("readLux", { sensorId: this.selectedSensorId }, 3000);
   }
 
   async sampleBurst(duration = 1000, interval = 100) {

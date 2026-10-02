@@ -45,12 +45,11 @@ struct CachedSensor {
 
     ~CachedSensor() {
         if (sensor) {
-            SensorState state;
-            // Only detach event sink if sensor is currently responsive and ready;
-            // otherwise, avoid blocking RPC calls during sleep/wake power transitions.
-            if (SUCCEEDED(sensor->GetState(&state)) && state == SENSOR_STATE_READY) {
+            try {
                 sensor->SetEventSink(nullptr);
-            }
+            } catch (...) {}
+            events.Reset();
+            sensor.Reset();
         }
     }
 };
@@ -100,6 +99,15 @@ double ReadLux(const ComPtr<ISensor>& sensor) {
 }
 
 void ClearCachedSensors() {
+    for (auto& entry : cachedLightSensors) {
+        if (entry.sensor) {
+            try {
+                entry.sensor->SetEventSink(nullptr);
+            } catch (...) {}
+            entry.events.Reset();
+            entry.sensor.Reset();
+        }
+    }
     cachedLightSensors.clear();
 }
 
@@ -229,7 +237,7 @@ Napi::Value NodeGetLuxValue(const Napi::CallbackInfo& info) {
 
 // Initialize the module
 Napi::Object Init(Napi::Env env, Napi::Object exports) {
-    sensorComLifetime = std::make_unique<ComInit>();
+    sensorComLifetime = std::make_unique<ComInit>(COINIT_MULTITHREADED);
     exports.Set(Napi::String::New(env, "getAmbientLightSensors"), 
                 Napi::Function::New(env, NodeGetAmbientLightSensors));
     exports.Set(Napi::String::New(env, "getLuxValue"), 

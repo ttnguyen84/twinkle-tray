@@ -50,7 +50,7 @@ using Microsoft::WRL::ComPtr;
 class ComInit
 {
 public:
-    explicit ComInit(DWORD coinit = COINIT_APARTMENTTHREADED) {
+    explicit ComInit(DWORD coinit = COINIT_MULTITHREADED) {
         const HRESULT hr = CoInitializeEx(nullptr, coinit);
         if (SUCCEEDED(hr)) {
             owns = true;
@@ -59,7 +59,7 @@ public:
             // COM is still usable on this thread, but this instance must not uninitialize it.
             owns = false;
         } else {
-            throw std::runtime_error("CoInitializeEx failed with HRESULT " + toHex(hr));
+            owns = false;
         }
     }
 

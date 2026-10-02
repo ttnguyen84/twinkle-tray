@@ -14,6 +14,8 @@ parentPort.on("message", (msg) => {
     } else if (type === "readLux") {
       const lux = getLuxValue(payload?.sensorId);
       parentPort.postMessage({ id, success: true, result: lux });
+    } else if (type === "stop") {
+      process.exit(0);
     } else {
       parentPort.postMessage({ id, success: false, error: `Unknown request type: ${type}` });
     }

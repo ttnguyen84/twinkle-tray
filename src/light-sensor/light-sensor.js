@@ -167,12 +167,12 @@ class LightSensor {
             console.log(`Light Sensor: reconnecting ${this.active.name} after resume`);
             const reconnectPromise = Promise.resolve().then(() => this.active.reconnect());
             const timeoutPromise = new Promise((_, reject) =>
-                setTimeout(() => reject(new Error("Sensor reconnect timed out after 2500ms")), 2500)
+                setTimeout(() => reject(new Error("Sensor reconnect timed out after 8000ms")), 8000)
             );
             await Promise.race([reconnectPromise, timeoutPromise]);
             if (options.immediate) {
                 const targetsPromise = Promise.resolve().then(() => this.getImmediateTargets());
-                const targetTimeout = new Promise(resolve => setTimeout(() => resolve(null), 1500));
+                const targetTimeout = new Promise(resolve => setTimeout(() => resolve(null), 3000));
                 return await Promise.race([targetsPromise, targetTimeout]);
             }
         } catch (error) {
