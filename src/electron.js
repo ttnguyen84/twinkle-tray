@@ -5272,6 +5272,7 @@ const toggleTray = async (doRefresh = true, isOverlay = false) => {
     tryPanelBrightnessUpdate()
     getThemeRegistry()
     getSettings()
+    lightSensor?.sendStatus?.(sendToAllWindows)
 
     // Send accent
     sendToAllWindows('update-colors', getAccentColors())

@@ -24,10 +24,19 @@ class Translate {
     getString(key, ...args) {
         if (this.localizationData[key] !== undefined && this.localizationData[key] !== "") {
             return this.makeTranslation(this.localizationData[key], args)
-        } else if (this.fallbackData[key] !== undefined & this.fallbackData[key] !== "") {
+        } else if (this.fallbackData[key] !== undefined && this.fallbackData[key] !== "") {
             return this.makeTranslation(this.fallbackData[key], args)
         } else {
-            return ""
+            const emergencyFallback = {
+                PANEL_DETAILS: "Details",
+                PANEL_AUTO_BRIGHTNESS: "Auto brightness",
+                PANEL_AUTO_LABEL: "Auto",
+                PANEL_AUTO_WAITING: "Waiting for sensor…",
+                PANEL_AUTO_STABILIZING: "Stabilizing…",
+                PANEL_AUTO_ADJUSTING: "Adjusting…",
+                PANEL_AUTO_ERROR: "Sensor unavailable"
+            }
+            return emergencyFallback[key] ? this.makeTranslation(emergencyFallback[key], args) : ""
         }
     }
     getHTML(key, ...args) {

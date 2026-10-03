@@ -156,6 +156,10 @@ function requestSettings() {
     ipc.send('request-settings')
 }
 
+function requestLightSensorStatus() {
+    ipc.send('request-light-sensor-status')
+}
+
 function sendHeight(height) {
     ipc.send('panel-height', height)
 }
@@ -212,6 +216,7 @@ function dismissUpdate() {
 ipc.on('tray-clicked', () => {
     window.document.getElementById("root").dataset["sleep"] = false
     setPanelVisibility(true)
+    requestLightSensorStatus()
 })
 
 ipc.on("panelBlur", (e) => {
@@ -468,6 +473,7 @@ window.openSettings = openSettings
 window.sendSettings = sendSettings
 window.setAutoBrightnessEnabled = setAutoBrightnessEnabled
 window.requestSettings = requestSettings
+window.requestLightSensorStatus = requestLightSensorStatus
 window.pauseMonitorUpdates = pauseMonitorUpdates
 window.installUpdate = installUpdate
 window.dismissUpdate = dismissUpdate

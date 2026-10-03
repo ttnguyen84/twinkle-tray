@@ -28,6 +28,7 @@
     "PANEL_AUTO_WAITING": "Đang chờ cảm biến",
     "PANEL_AUTO_STABILIZING": "Đang chờ ổn định",
     "PANEL_AUTO_ADJUSTING": "Đang điều chỉnh",
+    "PANEL_AUTO_ERROR": "Lỗi cảm biến",
     "INTRO_TITLE": "Xin chào, Twinkle Tray!",
     "INTRO_INSTRUCTIONS": "Biểu tượng Twinkle Tray đã bị ẩn, vì vậy bạn nên di chuyển nó đến nơi có thể dễ dàng truy cập. Xem bên dưới để được hướng dẫn.",
     "SETTINGS_TITLE": "Thiết lập Twinkle Tray",

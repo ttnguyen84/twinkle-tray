@@ -107,14 +107,19 @@ const BrightnessPanel = memo(function BrightnessPanel() {
       setLocalizationVersion(version => version + 1)
     }
     const handleUpdateUpdated = event => setState(current => ({ ...current, update: event.detail }))
-    const handleSleepUpdated = event => setState(current => ({
-      ...current,
-      sleeping: event.detail,
-      adjustmentActive: event.detail ? false : current.adjustmentActive,
-      linkedLevel: event.detail
-        ? (window.settings?.linkedLevel ?? current.linkedLevel)
-        : current.linkedLevel
-    }))
+    const handleSleepUpdated = event => {
+      setState(current => ({
+        ...current,
+        sleeping: event.detail,
+        adjustmentActive: event.detail ? false : current.adjustmentActive,
+        linkedLevel: event.detail
+          ? (window.settings?.linkedLevel ?? current.linkedLevel)
+          : current.linkedLevel
+      }))
+      if (!event.detail) {
+        window.ipc?.send('request-light-sensor-status')
+      }
+    }
     const handleRefreshingUpdated = event => setState(current => ({ ...current, isRefreshing: event.detail }))
     const handleProgressUpdated = event => setState(current => ({
       ...current,
@@ -142,6 +147,7 @@ const BrightnessPanel = memo(function BrightnessPanel() {
     window.requestSettings()
     window.requestMonitors()
     window.ipc.send('request-localization')
+    window.ipc.send('request-light-sensor-status')
     window.reactReady = true
 
     return () => {
@@ -261,15 +267,42 @@ const BrightnessPanel = memo(function BrightnessPanel() {
 
   const getAutoStatus = () => {
     if (!state.lightSensor?.enabled) return T.t("GENERIC_OFF")
-    if (!state.lightSensorStatus?.available) return T.t("PANEL_AUTO_WAITING")
-    if (Object.values(state.lightSensorStatus.monitors || {}).some(monitor => monitor.adjusting)) {
-      return T.t("PANEL_AUTO_ADJUSTING")
+    const lux = state.lightSensorStatus?.filteredLux ?? state.lightSensorStatus?.currentLux
+    const hasLux = Number.isFinite(lux)
+    const luxText = hasLux ? `${Math.round(lux)} ${T.t("GENERIC_LUX")}` : ""
+
+    const monitors = Object.values(state.lightSensorStatus?.monitors || {})
+    const isAdjusting = monitors.some(monitor => monitor.adjusting)
+    if (isAdjusting) {
+      return hasLux ? `${luxText} • ${T.t("PANEL_AUTO_ADJUSTING")}` : T.t("PANEL_AUTO_ADJUSTING")
     }
-    if (Object.values(state.lightSensorStatus.monitors || {}).some(monitor => monitor.stabilizing)) {
-      return T.t("PANEL_AUTO_STABILIZING")
+
+    const isStabilizing = monitors.some(monitor => monitor.stabilizing)
+    if (isStabilizing) {
+      return hasLux ? `${luxText} • ${T.t("PANEL_AUTO_STABILIZING")}` : T.t("PANEL_AUTO_STABILIZING")
     }
-    const lux = state.lightSensorStatus.filteredLux ?? state.lightSensorStatus.currentLux
-    return Number.isFinite(lux) ? `${Math.round(lux)} ${T.t("GENERIC_LUX")}` : T.t("GENERIC_ON")
+
+    if (hasLux) {
+      return luxText
+    }
+
+    if (!state.lightSensorStatus?.available) {
+      return T.t("PANEL_AUTO_WAITING")
+    }
+
+    return T.t("GENERIC_ON")
+  }
+
+  const getAutoStatusTooltip = () => {
+    if (!state.lightSensor?.enabled) return ""
+    const status = state.lightSensorStatus
+    if (!status) return ""
+    const parts = []
+    if (Number.isFinite(status.currentLux)) parts.push(`Current: ${Math.round(status.currentLux * 10) / 10} Lux`)
+    if (Number.isFinite(status.filteredLux)) parts.push(`Filtered: ${Math.round(status.filteredLux * 10) / 10} Lux`)
+    if (status.daytimeLuxOffset) parts.push(`Daytime boost: +${status.daytimeLuxOffset} Lux`)
+    if (Number.isFinite(status.targetBrightness)) parts.push(`Target: ${Math.round(status.targetBrightness)}%`)
+    return parts.join("\n")
   }
 
   return (
@@ -292,7 +325,7 @@ const BrightnessPanel = memo(function BrightnessPanel() {
           />
           <span>{T.t("PANEL_AUTO_BRIGHTNESS")}</span>
         </span>
-        <span className="auto-brightness-status">{getAutoStatus()}</span>
+        <span className="auto-brightness-status" title={getAutoStatusTooltip()}>{getAutoStatus()}</span>
       </label>
       {state.sleeping ? null : renderBrightnessControls()}
       {state.update?.show
