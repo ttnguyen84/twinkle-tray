@@ -491,3 +491,32 @@ test('_buildTargets includes daytime offset in brightness calculation', () => {
   assert.ok(boostTargets[monitor.key].targetBrightness > noBoostTargets[monitor.key].targetBrightness,
     'daytime boost should increase brightness target');
 });
+
+test('manual adjustment preserves brightness when ambient lux remains close', () => {
+  const monitor = { key: 'display-test', id: 'display-test-id', brightness: 60 };
+  const sensor = createSensor([monitor]);
+  sensor.filteredLux = 200;
+  sensor.currentLux = 200;
+  sensor.pauseManual();
+  sensor.manualPauseUntil = 0; // Simulate manual pause duration expiration
+
+  // Small lux jitter (+3 lux < 15)
+  sensor._processReading(203, { resume: true });
+  assert.equal(Object.keys(sensor.ramps).length, 0, 'should not ramp when lux did not diverge');
+  clearTimeout(sensor.manualPauseTimer);
+});
+
+test('ambient lux divergence resumes auto adjustment after manual pause', () => {
+  const monitor = { key: 'display-test', id: 'display-test-id', brightness: 60 };
+  const sensor = createSensor([monitor]);
+  sensor.filteredLux = 200;
+  sensor.currentLux = 200;
+  sensor.pauseManual();
+  sensor.manualPauseUntil = 0;
+
+  // Ambient lux changes significantly (+50 lux >= 15)
+  sensor._processReading(250, { resume: true });
+  assert.equal(sensor.manualLux, null, 'manualLux cleared upon significant lux change');
+  clearTimeout(sensor.manualPauseTimer);
+});
+

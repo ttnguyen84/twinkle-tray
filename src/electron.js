@@ -3058,6 +3058,10 @@ function handleBrightnessWriteResult(result) {
 async function verifyBrightnessWrite(record) {
   brightnessVerificationTimers.delete(record.monitorKey)
   if (latestBrightnessWrites.get(record.monitorKey) !== record.requestId) return
+  if (panelBrightnessSession) {
+    console.log("Brightness write verification skipped during manual adjustment")
+    return
+  }
 
   try {
     const knownBrightness = await readKnownBrightnessJob(
@@ -3298,6 +3302,18 @@ function startPanelBrightnessSession() {
   return panelBrightnessSession
 }
 
+let panelBrightnessCommitTimer = null
+
+function schedulePanelBrightnessCommit(delay = 1000) {
+  if (panelBrightnessCommitTimer) clearTimeout(panelBrightnessCommitTimer)
+  panelBrightnessCommitTimer = setTimeout(() => {
+    panelBrightnessCommitTimer = null
+    if (panelBrightnessSession) {
+      commitPanelBrightnessSession(false)
+    }
+  }, delay)
+}
+
 function applyLinkLevel(level) {
   const session = startPanelBrightnessSession()
   const nextLevel = minMax(Number(level) || 0)
@@ -3308,6 +3324,7 @@ function applyLinkLevel(level) {
     applyLogicalBrightness(monitor, nextLevel, true)
   }
   sendToAllWindows('monitors-updated', monitors)
+  schedulePanelBrightnessCommit(1000)
 }
 
 function previewMonitorOutput(index, level) {
@@ -3325,6 +3342,7 @@ function previewMonitorOutput(index, level) {
   }
   monitor.brightnessRaw = output
   sendToAllWindows('monitors-updated', monitors)
+  schedulePanelBrightnessCommit(1000)
   return true
 }
 
@@ -3350,10 +3368,16 @@ function getSessionMonitorOutput(session, monitor) {
   return session.startRawByMonitor[monitor.key] ?? getMonitorOutputLevel(monitor)
 }
 
-function commitPanelBrightnessSession() {
+function commitPanelBrightnessSession(finalize = true) {
   const session = panelBrightnessSession
   if (!session) return false
-  panelBrightnessSession = null
+  if (panelBrightnessCommitTimer) {
+    clearTimeout(panelBrightnessCommitTimer)
+    panelBrightnessCommitTimer = null
+  }
+  if (finalize) {
+    panelBrightnessSession = null
+  }
 
   const activeMonitors = Object.values(monitors).filter(canControlBrightness)
   const outputLevels = activeMonitors.map(monitor => getSessionMonitorOutput(session, monitor))
@@ -3408,6 +3432,16 @@ function commitPanelBrightnessSession() {
   }
   settings.linkedLevel = linkedLevel
 
+  if (!finalize && session) {
+    session.startLinkLevel = linkedLevel
+    session.previewLinkLevel = linkedLevel
+    session.linkTouched = false
+    session.startRawByMonitor = Object.fromEntries(
+      activeMonitors.map(monitor => [monitor.key, getMonitorOutputLevel(monitor)])
+    )
+    session.finalRawByTouchedMonitor = {}
+  }
+
   for (const monitor of activeMonitors) {
     const output = getSessionMonitorOutput(session, monitor)
     monitor.brightnessRaw = output
@@ -3420,10 +3454,14 @@ function commitPanelBrightnessSession() {
     )
   }
 
-  if (linkedLevelChanged && settings.lightSensor?.enabled) {
+  if ((linkedLevelChanged || remapsChanged || individualTouched) && settings.lightSensor?.enabled) {
     lightSensor.learnLinkLevel(linkedLevel)
   }
-  lightSensor.setManualSessionActive(false)
+  if (finalize) {
+    lightSensor.setManualSessionActive(false)
+  } else {
+    lightSensor.pauseManual(10000)
+  }
   sendToAllWindows('monitors-updated', monitors)
   return true
 }

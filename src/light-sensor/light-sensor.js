@@ -76,6 +76,7 @@ class LightSensor {
         this.manualPauseUntil = 0;
         this.manualPauseTimer = null;
         this.manualSessionActive = false;
+        this.manualLux = null;
         this.sendToAllWindows = null;
         this.applyBrightness = null;
         this.notifyMonitors = null;
@@ -210,6 +211,7 @@ class LightSensor {
     pauseManual(duration = MANUAL_PAUSE_MS) {
         const pauseDuration = Math.max(0, Number(duration) || MANUAL_PAUSE_MS);
         this.manualPauseUntil = Math.max(this.manualPauseUntil, Date.now() + pauseDuration);
+        this.manualLux = this.filteredLux ?? this.currentLux;
         this._stopRamps();
         this._scheduleManualResume();
         this._sendStatus();
@@ -225,6 +227,7 @@ class LightSensor {
     learnLinkLevel(level) {
         const lux = this.filteredLux ?? this.currentLux;
         if (!this.settings.enabled || !Number.isFinite(lux)) return false;
+        this.manualLux = lux;
         const learnedAdjustments = learnBrightnessCurve(
             this.settings.learnedAdjustments,
             lux,
@@ -413,6 +416,11 @@ class LightSensor {
         const now = Date.now();
         const targets = this._buildTargets(lux);
         const manuallyPaused = this._isManuallyPaused(now);
+        const luxDiverged = !Number.isFinite(this.manualLux)
+            || Math.abs(lux - this.manualLux) >= 15;
+        if (luxDiverged) {
+            this.manualLux = null;
+        }
         let acceptedLinkedLevel = null;
 
         for (const monitor of this._getEnabledMonitors()) {
@@ -468,7 +476,7 @@ class LightSensor {
                 continue;
             }
 
-            if (manuallyPaused) continue;
+            if (manuallyPaused || (!luxDiverged && !options.force)) continue;
             const delay = getAdaptiveDelay(deltaPoints, isDimming);
             if (now < state.shadowUntil || (!options.resume && now - state.stableSince < delay)) continue;
 
