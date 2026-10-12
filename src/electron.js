@@ -4215,7 +4215,7 @@ function createPanel(toggleOnLoad = false, isRefreshing = false, showOnLoad = tr
     if (taskbarCreatedMsg > 0) {
       mainWindow.hookWindowMessage(taskbarCreatedMsg, () => {
         console.log("[TRAY] TaskbarCreated message received from Windows Explorer, scheduling tray recreation...");
-        setTimeout(() => recreateTray(300), 800);
+        setTimeout(() => recreateTray(300, true), 800);
       });
     }
   } catch (e) {
@@ -4245,7 +4245,11 @@ function createPanel(toggleOnLoad = false, isRefreshing = false, showOnLoad = tr
       if (setting.data === 1 || setting.data === 2) {
         console.log(`Display wake event: ${setting.name} (${setting.data})`)
         isWindowsUserIdle = false
-        recreateTray(500)
+        if (settings.recreateTray || !tray || (typeof tray?.isDestroyed === 'function' && tray.isDestroyed())) {
+          recreateTray(500)
+        } else {
+          updateTrayIcon()
+        }
         if ((recentlyWokeUp && !resumeRecoveryHandled) || !monitorsThreadReady) {
           scheduleSystemResume(`${setting.name}(${setting.data})`, 2000)
         }
@@ -4255,7 +4259,11 @@ function createPanel(toggleOnLoad = false, isRefreshing = false, showOnLoad = tr
       if (setting.data === 1) {
         console.log("Monitor power on event")
         isWindowsUserIdle = false
-        recreateTray(500)
+        if (settings.recreateTray || !tray || (typeof tray?.isDestroyed === 'function' && tray.isDestroyed())) {
+          recreateTray(500)
+        } else {
+          updateTrayIcon()
+        }
         if ((recentlyWokeUp && !resumeRecoveryHandled) || !monitorsThreadReady) {
           scheduleSystemResume("GUID_MONITOR_POWER_ON", 2000)
         }
@@ -5059,8 +5067,12 @@ function updateTrayIcon(force = false) {
   }
 }
 
+let lastPromoteTrayTime = 0
 function promoteTrayInWindows11() {
   if (process.platform !== "win32") return;
+  const now = Date.now()
+  if (now - lastPromoteTrayTime < 5000) return;
+  lastPromoteTrayTime = now
   try {
     const { exec } = require('child_process');
     exec(`powershell -NoProfile -Command "Get-ChildItem 'HKCU:\\Control Panel\\NotifyIconSettings' -ErrorAction SilentlyContinue | ForEach-Object { $p = $_.PSPath; $props = Get-ItemProperty $p; if ($props.ExecutablePath -like '*Twinkle*') { Set-ItemProperty -Path $p -Name 'IsPromoted' -Value 1 -Type DWord -ErrorAction SilentlyContinue } }"`, { windowsHide: true }, () => {});
@@ -5069,42 +5081,61 @@ function promoteTrayInWindows11() {
 
 let recreatingTray = false
 let recreateTrayTimer = null
-async function recreateTray(delayMs = 250) {
+let pendingRecreateTrayForce = false
+
+async function recreateTray(delayMs = 250, force = false) {
+  if (force) {
+    pendingRecreateTrayForce = true;
+  }
+
+  // Trailing debounce: If calls arrive rapidly within delayMs, push back and execute once
   if (recreateTrayTimer) {
     clearTimeout(recreateTrayTimer);
     recreateTrayTimer = null;
   }
 
   if (recreatingTray) {
-    console.log("[TRAY] recreateTray already in progress, scheduling after current run...")
-    recreateTrayTimer = setTimeout(() => recreateTray(delayMs), delayMs + 100);
+    console.log("[TRAY] recreateTray already in progress, rescheduling after current execution...")
+    recreateTrayTimer = setTimeout(() => recreateTray(delayMs, force), delayMs + 100);
     return;
   }
 
-  recreatingTray = true;
-  console.log(`[TRAY] recreateTray requested (delay: ${delayMs}ms)...`);
+  recreateTrayTimer = setTimeout(async () => {
+    recreateTrayTimer = null;
+    const shouldForce = pendingRecreateTrayForce;
+    pendingRecreateTrayForce = false;
 
-  try {
-    if (tray && typeof tray.destroy === "function") {
-      try {
-        tray.destroy();
-      } catch (e) {
-        console.warn("[TRAY] Error destroying old tray:", e);
+    // Check if recreation is actually necessary
+    const trayAlive = Boolean(tray && typeof tray.isDestroyed === 'function' && !tray.isDestroyed());
+    if (!shouldForce && !settings.recreateTray && trayAlive) {
+      console.log("[TRAY] Tray icon is alive and healthy, refreshing image instead of recreating");
+      updateTrayIcon();
+      return;
+    }
+
+    recreatingTray = true;
+    console.log(`[TRAY] Executing recreateTray (forced: ${shouldForce})...`);
+
+    try {
+      const oldTray = tray;
+      tray = null;
+
+      if (oldTray && typeof oldTray.destroy === "function" && !oldTray.isDestroyed()) {
+        try {
+          oldTray.destroy();
+        } catch (e) {
+          console.warn("[TRAY] Error destroying old tray:", e);
+        }
       }
-    }
-    tray = null;
 
-    if (delayMs > 0) {
-      await new Promise(resolve => setTimeout(resolve, delayMs));
+      createTray();
+      promoteTrayInWindows11();
+    } catch (e) {
+      console.error("[TRAY] Error during recreateTray:", e);
+    } finally {
+      recreatingTray = false;
     }
-
-    createTray();
-    promoteTrayInWindows11();
-  } catch (e) {
-    console.error("[TRAY] Error during recreateTray:", e);
-  } finally {
-    recreatingTray = false;
-  }
+  }, Math.max(0, delayMs));
 }
 
 function setTrayMenu() {
@@ -5167,7 +5198,7 @@ function getDebugTrayMenuItems() {
   return {
     label: "DEBUG", visible: (settings.isDev ? true : false), submenu: [
       { label: "RESTART PANEL", type: 'normal', click: () => restartPanel() },
-      { label: "RECREATE TRAY", type: 'normal', click: () => recreateTray() },
+      { label: "RECREATE TRAY", type: 'normal', click: () => recreateTray(100, true) },
       { label: "MINIMIZE PANEL", type: 'normal', click: () => mainWindow?.minimize() },
       { label: "HIDE PANEL", type: 'normal', click: () => showPanel(false) },
       { label: "OPACITY 0", type: 'normal', click: () => mainWindow?.setOpacity(0) },
@@ -5779,12 +5810,20 @@ function addEventListeners() {
   screen.addListener("display-added", () => {
     if(settings.useElectronEvents) handleMonitorChange("display-added");
     repositionPanel();
-    recreateTray(300);
+    if(settings.recreateTray || !tray || (typeof tray?.isDestroyed === 'function' && tray.isDestroyed())) {
+      recreateTray(300);
+    } else {
+      updateTrayIcon();
+    }
   })
   screen.addListener("display-removed", () => {
     if(settings.useElectronEvents) handleMonitorChange("display-removed");
     repositionPanel();
-    recreateTray(300);
+    if(settings.recreateTray || !tray || (typeof tray?.isDestroyed === 'function' && tray.isDestroyed())) {
+      recreateTray(300);
+    } else {
+      updateTrayIcon();
+    }
   })
   screen.addListener("display-metrics-changed", () => {
     if(settings.useElectronEvents) handleMetricsChange("display-metrics-changed");
@@ -5887,7 +5926,11 @@ function handleMonitorChange(t, e, d) {
   }
   const delay = Math.max(500, parseInt(settings.hardwareRestoreSeconds ?? 5) * 1000)
   handleChangeTimeout2 = setTimeout(async () => {
-    recreateTray(300);
+    if(settings.recreateTray || !tray || (typeof tray?.isDestroyed === 'function' && tray.isDestroyed())) {
+      recreateTray(300);
+    } else {
+      updateTrayIcon();
+    }
 
     // Reset all known displays
     await refreshMonitors(true, false, false, hasEnabledLinkedFeatures())
@@ -6036,7 +6079,11 @@ async function handleSystemResume(source = "powerMonitor:resume") {
     )
 
     if (!settings.disableAutoRefresh) {
-      recreateTray(300);
+      if(settings.recreateTray || !tray || (typeof tray?.isDestroyed === 'function' && tray.isDestroyed())) {
+        recreateTray(300);
+      } else {
+        updateTrayIcon();
+      }
       if(settings.recreateFlyout && !panelSize.visible) restartPanel();
 
       // Check if time adjustments should apply
@@ -6135,7 +6182,11 @@ powerMonitor.on("lock-screen", () => {
 })
 powerMonitor.on("unlock-screen", () => {
   console.log("Event: unlock-screen");
-  recreateTray(300);
+  if(settings.recreateTray || !tray || (typeof tray?.isDestroyed === 'function' && tray.isDestroyed())) {
+    recreateTray(300);
+  } else {
+    updateTrayIcon();
+  }
   if (recentlyWokeUp) {
     if(resumeRecoveryInProgress) {
       console.log("Resume recovery is already handling unlock-screen.")
@@ -6726,13 +6777,15 @@ function handleCommandLine(event, argv, directory, additionalData) {
 
         // Show panel
         if (arg.indexOf("--panel") === 0) {
-          recreateTray(100)
+          if (!tray || (typeof tray.isDestroyed === 'function' && tray.isDestroyed())) {
+            recreateTray(100)
+          }
           toggleTray(true)
         }
 
         // Recreate tray
         if (arg.indexOf("--recreate-tray") === 0) {
-          recreateTray(100)
+          recreateTray(100, true)
         }
 
       })
@@ -6778,7 +6831,9 @@ function handleCommandLine(event, argv, directory, additionalData) {
     } else {
       // Launched second instance without arguments (e.g. clicked shortcut)
       console.log("[CLI] Second instance opened with no arguments: restoring tray and panel");
-      recreateTray(100);
+      if (!tray || (typeof tray.isDestroyed === 'function' && tray.isDestroyed())) {
+        recreateTray(100);
+      }
       toggleTray(true);
     }
 
@@ -6913,11 +6968,13 @@ const handleClientMessage = async (message, remote) => {
       // List all current monitors
       return JSON.stringify(monitors)
     } else if (data.type === "panel") {
-      recreateTray(100)
+      if (!tray || (typeof tray.isDestroyed === 'function' && tray.isDestroyed())) {
+        recreateTray(100)
+      }
       toggleTray(true)
       return "OK"
     } else if (data.type === "recreate-tray") {
-      recreateTray(100)
+      recreateTray(100, true)
       return "OK"
     } else if (data.type === "get") {
       // data.type === "get"
