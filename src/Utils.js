@@ -351,11 +351,73 @@ function normalizeCalibrationPoints(calibrationPoints = [], includeEndpoints = t
         });
 }
 
-function upsertCalibrationPoint(calibrationPoints, input, output) {
+function upsertCalibrationPoint(calibrationPoints, input, output, options = {}) {
+    const {
+        clusterRadius = 10,
+        maxPoints = 6,
+        average = false,
+        smoothingFactor = 0.75
+    } = (typeof options === "object" && options !== null) ? options : {};
+
     const position = Math.round(Math.max(0, Math.min(100, Number(input) || 0)) * 100) / 100;
-    const points = normalizeCalibrationPoints(calibrationPoints, false)
-        .filter(point => Math.abs(point.input - position) >= 0.5);
-    points.push({ input: position, output });
+    const targetOutput = Math.round(Math.max(0, Math.min(100, Number(output) || 0)) * 100) / 100;
+
+    let points = normalizeCalibrationPoints(calibrationPoints, false);
+
+    // Tìm điểm gần nhất
+    let nearestIndex = -1;
+    let minDistance = Infinity;
+    for (let i = 0; i < points.length; i++) {
+        const distance = Math.abs(points[i].input - position);
+        if (distance < minDistance) {
+            minDistance = distance;
+            nearestIndex = i;
+        }
+    }
+
+    let activePoint;
+    if (nearestIndex !== -1 && minDistance <= clusterRadius) {
+        const existing = points[nearestIndex];
+        const newOutput = average
+            ? Math.round((smoothingFactor * targetOutput + (1 - smoothingFactor) * existing.output) * 100) / 100
+            : targetOutput;
+        const newInput = minDistance < 1 ? position : existing.input;
+        activePoint = { input: newInput, output: newOutput };
+        points[nearestIndex] = activePoint;
+    } else if (points.length >= maxPoints && nearestIndex !== -1) {
+        // Đã đạt số lượng điểm tối đa: cập nhật điểm gần nhất thay vì sinh thêm điểm mới
+        const existing = points[nearestIndex];
+        const newOutput = average
+            ? Math.round((smoothingFactor * targetOutput + (1 - smoothingFactor) * existing.output) * 100) / 100
+            : targetOutput;
+        activePoint = { input: existing.input, output: newOutput };
+        points[nearestIndex] = activePoint;
+    } else {
+        // Thêm điểm mới
+        activePoint = { input: position, output: targetOutput };
+        points.push(activePoint);
+    }
+
+    // Sắp xếp các điểm theo input tăng dần
+    points.sort((a, b) => a.input - b.input);
+    const activeIndex = points.indexOf(activePoint);
+
+    // Bảo toàn đơn điệu hai chiều (Two-way Monotonic Relaxation) từ activePoint
+    if (activeIndex > 0) {
+        for (let i = activeIndex - 1; i >= 0; i--) {
+            if (points[i].output > points[i + 1].output) {
+                points[i] = { ...points[i], output: points[i + 1].output };
+            }
+        }
+    }
+    if (activeIndex !== -1 && activeIndex < points.length - 1) {
+        for (let i = activeIndex + 1; i < points.length; i++) {
+            if (points[i].output < points[i - 1].output) {
+                points[i] = { ...points[i], output: points[i - 1].output };
+            }
+        }
+    }
+
     return normalizeCalibrationPoints(points, false);
 }
 

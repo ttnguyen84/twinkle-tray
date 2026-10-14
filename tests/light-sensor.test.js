@@ -97,6 +97,56 @@ test('upserts at most one calibration point around the same Link level', () => {
   assert.deepEqual(points[0], { input: 50.2, output: 55 });
 });
 
+test('clusters calibration points within radius instead of spamming new points', () => {
+  let points = upsertCalibrationPoint([], 15, 35, { clusterRadius: 10 });
+  // Chỉnh ở 18 (cách 3 <= 10): cập nhật điểm 15 cũ, không tạo điểm mới
+  points = upsertCalibrationPoint(points, 18, 38, { clusterRadius: 10 });
+  assert.equal(points.length, 1);
+  assert.equal(points[0].input, 15);
+  assert.equal(points[0].output, 38);
+});
+
+test('enforces maxPoints limit by updating nearest point', () => {
+  let points = [];
+  for (const val of [10, 25, 40, 55, 70, 85]) {
+    points = upsertCalibrationPoint(points, val, val + 5, { clusterRadius: 5, maxPoints: 6 });
+  }
+  assert.equal(points.length, 6);
+
+  // Thêm điểm thứ 7 ở 58 (gần 55): không vượt quá 6 điểm, điểm 55 được cập nhật
+  points = upsertCalibrationPoint(points, 58, 65, { clusterRadius: 2, maxPoints: 6 });
+  assert.equal(points.length, 6);
+  const updated55 = points.find(p => p.input === 55);
+  assert.equal(updated55.output, 65);
+});
+
+test('relaxes two-way monotonicity without forcing flat line at later inputs', () => {
+  let points = upsertCalibrationPoint([], 15, 35, { clusterRadius: 5 });
+  // Ở input 30 muốn giảm độ sáng xuống 20: điểm 15 được hạ xuống 20, điểm 30 không bị ép lên 35
+  points = upsertCalibrationPoint(points, 30, 20, { clusterRadius: 5 });
+  assert.equal(points.length, 2);
+  assert.deepEqual(points, [
+    { input: 15, output: 20 },
+    { input: 30, output: 20 }
+  ]);
+
+  // Tiếp tục tăng ở input 50 lên 45: điểm 15 và 30 giữ nguyên 20, điểm 50 là 45
+  points = upsertCalibrationPoint(points, 50, 45, { clusterRadius: 5 });
+  assert.equal(points.length, 3);
+  assert.deepEqual(points, [
+    { input: 15, output: 20 },
+    { input: 30, output: 20 },
+    { input: 50, output: 45 }
+  ]);
+});
+
+test('smooths output using weighted average when average option is enabled', () => {
+  let points = upsertCalibrationPoint([], 50, 60, { average: true });
+  points = upsertCalibrationPoint(points, 52, 40, { average: true, smoothingFactor: 0.75 });
+  assert.equal(points.length, 1);
+  assert.equal(points[0].output, 45);
+});
+
 test('calibration can map Link level forward and infer it in reverse', () => {
   const points = [{ input: 50, output: 60 }];
   assert.equal(getCalibratedValue(50, points), 60);

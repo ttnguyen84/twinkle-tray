@@ -3418,7 +3418,8 @@ function commitPanelBrightnessSession(finalize = true) {
         calibration: Utils.upsertCalibrationPoint(
           currentRemap.calibration ?? monitor.calibration ?? [],
           linkedLevel,
-          output
+          output,
+          { clusterRadius: 10, maxPoints: 6, average: true }
         )
       }
     }
